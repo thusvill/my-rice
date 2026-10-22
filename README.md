@@ -2,6 +2,10 @@
 
 A lightweight black-and-grayscale Niri setup using Waybar, Kitty, Fish, Fuzzel, Swaylock, Wlogout, Dunst, and YAD. It does not use Quickshell.
 
+## Vibe-coded
+
+This rice is vibe-coded: the configuration, scripts, native GTK settings app, display controls, lock-screen workflow, wallpaper tools, Waybar modules, and LazyVim theme were developed collaboratively with AI assistance and iterated against the local Niri environment. Review the scripts and adjust them for your hardware, installed applications, and personal preferences before deploying them.
+
 ## Apply
 
 ```sh
