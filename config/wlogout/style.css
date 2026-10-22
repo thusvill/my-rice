@@ -1,0 +1,12 @@
+* { all: unset; font-family: "JetBrains Mono", monospace; transition: 150ms ease-in-out; }
+window { background: rgba(0, 0, 0, 0.92); }
+button {
+    color: #d6d6d6;
+    font-size: 13px;
+    background: #101010;
+    border: 1px solid #292929;
+    border-radius: 8px;
+    padding: 24px;
+    margin: 8px;
+}
+button:hover, button:focus { color: #ffffff; background: #202020; border-color: #777777; }

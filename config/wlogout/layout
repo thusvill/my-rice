@@ -1,0 +1,24 @@
+{
+    "label": "logout",
+    "action": "niri msg action quit --skip-confirmation || loginctl terminate-user $USER",
+    "text": "Logout",
+    "keybind": "1"
+}
+{
+    "label": "reboot",
+    "action": "systemctl reboot",
+    "text": "Reboot",
+    "keybind": "2"
+}
+{
+    "label": "shutdown",
+    "action": "systemctl poweroff",
+    "text": "Shutdown",
+    "keybind": "3"
+}
+{
+    "label": "uefi",
+    "action": "systemctl reboot --firmware-setup",
+    "text": "Firmware",
+    "keybind": "4"
+}

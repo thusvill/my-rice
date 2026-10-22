@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+user_home="${HOME}"
+stamp="$(date +%Y%m%d-%H%M%S)"
+destination="${user_home}/.local/state/noir-rice/backups/manual-${stamp}"
+mkdir -p "$destination"
+
+for relative in .config/niri .config/waybar .config/kitty .config/swaylock .config/noir-rice .config/nvim; do
+    source="${user_home}/${relative}"
+    [[ -e "$source" ]] || continue
+    mkdir -p "$destination/$(dirname -- "$relative")"
+    cp -a "$source" "$destination/$relative"
+done
+
+printf 'Manual Noir backup created: %s\n' "$destination"

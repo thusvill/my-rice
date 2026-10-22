@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+if command -v dunstctl >/dev/null 2>&1; then
+    count="$(dunstctl count history 2>/dev/null || printf '0')"
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+else
+    count=0
+fi
+printf '󰂚 %s\n' "$count"

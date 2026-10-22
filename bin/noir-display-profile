@@ -1,0 +1,83 @@
+#!/usr/bin/python3
+"""Restore the saved Noir display profile after Niri outputs are ready."""
+
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+STATE = CONFIG / "noir-rice" / "display.json"
+
+
+def command(*args, check=True):
+    return subprocess.run(["niri", "msg", *args], check=check, capture_output=True, text=True)
+
+
+def outputs():
+    try:
+        return json.loads(command("--json", "outputs").stdout)
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError):
+        return {}
+
+
+def primary_name(names):
+    return next((name for name in names if name.lower().startswith(("edp", "lvds", "dsi"))), names[0] if names else "")
+
+
+def apply_profile(mode, data):
+    names = sorted(data)
+    primary = primary_name(names)
+    external = [name for name in names if name != primary]
+    if not external:
+        mode = "primary"
+
+    if mode == "primary":
+        for name in names:
+            command("output", name, "on" if name == primary else "off")
+        if primary:
+            command("output", primary, "position", "set", "0", "0")
+    elif mode == "secondary" and external:
+        secondary = external[0]
+        for name in names:
+            command("output", name, "on" if name == secondary else "off")
+        command("output", secondary, "position", "set", "0", "0")
+    elif mode == "mirror" and external and subprocess.run(["which", "wl-mirror"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+        for name in names:
+            command("output", name, "on")
+        subprocess.run(["pkill", "-x", "wl-mirror"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(["wl-mirror", "--fullscreen-output", external[0], primary], start_new_session=True)
+    else:
+        # Extend is also the safe fallback for an unknown or unavailable mode.
+        x = 0
+        for name in names:
+            command("output", name, "on")
+            logical = (data[name] or {}).get("logical") or {}
+            width = int(logical.get("width", 1920))
+            command("output", name, "position", "set", str(x), "0")
+            x += width
+
+
+def main():
+    try:
+        saved = json.loads(STATE.read_text()).get("profile", "primary")
+    except (OSError, json.JSONDecodeError):
+        saved = "primary"
+    if saved not in {"primary", "secondary", "mirror", "extend"}:
+        saved = "primary"
+
+    data = {}
+    for _ in range(15):
+        data = outputs()
+        if data:
+            break
+        time.sleep(1)
+    if data:
+        apply_profile(saved, data)
+
+
+if __name__ == "__main__":
+    main()

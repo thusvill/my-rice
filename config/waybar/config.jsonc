@@ -1,0 +1,95 @@
+{
+    "layer": "top",
+    "position": "top",
+    "height": 32,
+    "spacing": 8,
+    "modules-left": ["niri/workspaces", "custom/layout"],
+    "modules-center": ["clock", "custom/weather", "custom/notifications"],
+    "modules-right": ["tray", "cpu", "memory", "disk", "pulseaudio", "pulseaudio#microphone", "network", "battery", "custom/settings", "custom/power"],
+    "niri/workspaces": {
+        "format": "{value}",
+        "all-outputs": true,
+        "current-only": false,
+        "disable-click": false,
+        "on-scroll-up": "niri msg action focus-workspace-up",
+        "on-scroll-down": "niri msg action focus-workspace-down"
+    },
+    "custom/layout": { "format": "󰕮", "tooltip": "Noir desktop", "on-click": "sh -c '$HOME/.local/bin/noir-settings'" },
+    "clock": {
+        "format": "{:%H:%M %a, %b %d}",
+        "tooltip-format": "<big>{:%Y %B}</big>\n<tt><small>{calendar}</small></tt>"
+    },
+    "custom/weather": {
+        "exec": "noir-weather",
+        "interval": 900,
+        "format": "{}",
+        "on-click": "xdg-open https://wttr.in"
+    },
+    "custom/notifications": {
+        "exec": "noir-notifications",
+        "interval": 2,
+        "format": "{}",
+        "on-click": "dunstctl history-pop",
+        "on-click-right": "dunstctl close-all",
+        "on-click-middle": "dunstctl set-paused toggle"
+    },
+    "tray": { "icon-size": 14, "spacing": 8 },
+    "cpu": {
+        "interval": 2,
+        "format": "󰻠 {usage}%",
+        "format-alt": "󰻠 {load1}",
+        "tooltip-format": "CPU usage: {usage}%\nLoad: {load1} {load5} {load15}"
+    },
+    "memory": {
+        "interval": 2,
+        "format": "󰘚 {percentage}%",
+        "format-alt": "󰘚 {used:0.1f}G/{total:0.1f}G",
+        "tooltip-format": "Memory: {used:0.1f}G / {total:0.1f}G"
+    },
+    "disk": {
+        "interval": 30,
+        "path": "/",
+        "format": "󰋊 {percentage_used}%",
+        "tooltip-format": "Disk: {used} / {total} ({percentage_used}%)"
+    },
+    "pulseaudio": {
+        "format": "{icon} {volume}%",
+        "format-muted": "󰖁 {volume}%",
+        "format-icons": ["󰕿", "󰖀", "󰕾"],
+        "scroll-step": 5,
+        "on-click": "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle",
+        "on-click-right": "pavucontrol"
+    },
+    "pulseaudio#microphone": {
+        "format": "{format_source}",
+        "format-source": "󰍬 {volume}%",
+        "format-source-muted": "󰍭 {volume}%",
+        "on-click": "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle",
+        "on-click-right": "pavucontrol"
+    },
+    "network": {
+        "format-wifi": "󰤨 {signalStrength}%",
+        "format-ethernet": "󰈀 {ipaddr}",
+        "format-disconnected": "󰤭",
+        "tooltip-format": "{essid} · {ifname} · {ipaddr}",
+        "on-click": "nm-connection-editor",
+        "on-click-right": "kitty nmtui"
+    },
+    "battery": {
+        "states": { "warning": 30, "critical": 15 },
+        "format": "{icon} {capacity}%",
+        "format-charging": "󰂄 {capacity}%",
+        "format-icons": ["󰁺", "󰁼", "󰁾", "󰂀", "󰁹"]
+    },
+    "custom/settings": {
+        "format": "󰒓",
+        "tooltip": true,
+        "tooltip-format": "Noir Settings",
+        "on-click": "sh -c '$HOME/.local/bin/noir-settings'"
+    },
+    "custom/power": {
+        "format": "󰐥",
+        "tooltip": false,
+        "on-click": "wlogout -b 4 -c 16 -r 0 -m 340 -s"
+    }
+}

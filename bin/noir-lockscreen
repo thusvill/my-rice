@@ -1,0 +1,96 @@
+#!/usr/bin/python3
+"""Prepare the Noir lock background and start Swaylock."""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+HOME = Path.home()
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+STATE = CONFIG / "noir-rice" / "lockscreen.json"
+SWAYLOCK = CONFIG / "swaylock" / "config"
+CACHE = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "noir-rice"
+
+
+def read_state():
+    try:
+        return json.loads(STATE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def current_wallpaper():
+    marker = CACHE / "current-wallpaper"
+    try:
+        path = Path(marker.read_text().strip())
+        return path if path.is_file() else None
+    except OSError:
+        return None
+
+
+def make_background(state):
+    wallpaper = Path(state.get("wallpaper", "")).expanduser()
+    if not wallpaper.is_file():
+        wallpaper = current_wallpaper()
+    converter = shutil.which("magick") or shutil.which("convert")
+    if not wallpaper or not converter:
+        return None
+
+    output = CACHE / "lockscreen-background.png"
+    CACHE.mkdir(parents=True, exist_ok=True)
+    size = os.environ.get("NOIR_LOCK_SIZE", "1920x1080")
+    blur = max(0, min(80, int(state.get("blur", 18))))
+    command = [converter, str(wallpaper), "-resize", f"{size}^", "-gravity", "center",
+               "-extent", size, "-blur", f"0x{blur}"]
+    if state.get("clock", True):
+        clock_format = state.get("clock_format", "%H:%M")
+        clock_text = datetime.now().strftime(clock_format)
+        color = state.get("clock_color", "#d0d0d0")
+        if not color.startswith("#"):
+            color = "#" + color
+        font_setting = state.get("clock_font", "JetBrains Mono")
+        position = state.get("clock_position", "top")
+        gravity = {"top": "north", "center": "center", "bottom": "south"}.get(position, "north")
+        x_offset = int(state.get("clock_x", 0))
+        y_offset = int(state.get("clock_y", 90 if position == "top" else 0))
+        try:
+            font_name = subprocess.check_output(["fc-match", "-f", "%{file}", font_setting], text=True).strip()
+        except (OSError, subprocess.CalledProcessError):
+            font_name = "DejaVu-Sans-Mono"
+        command += ["-fill", color, "-font", font_name, "-pointsize",
+                    str(max(16, min(300, int(state.get("clock_size", 96))))),
+                    "-gravity", gravity, "-annotate", f"{x_offset:+d}{y_offset:+d}", clock_text]
+    command.append(str(output))
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return output
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return None
+
+
+def main():
+    state = read_state()
+    background = make_background(state)
+    if "--preview" in sys.argv:
+        return
+    command = ["swaylock", "-C", str(SWAYLOCK)]
+    if background:
+        # Avoid a conflict between swaylock's color and image options on
+        # versions that treat them as mutually exclusive.
+        runtime_config = CACHE / "swaylock-runtime.conf"
+        try:
+            lines = SWAYLOCK.read_text().splitlines()
+            runtime_config.write_text("\n".join(line for line in lines if not line.startswith("color=")) + "\n")
+            command[2] = str(runtime_config)
+        except OSError:
+            pass
+        command += ["-i", str(background), "-s", "fill"]
+    os.execvp(command[0], command)
+
+
+if __name__ == "__main__":
+    main()

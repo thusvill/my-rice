@@ -1,0 +1,30 @@
+[global]
+    monitor = 0
+    follow = mouse
+    width = 360
+    height = 120
+    origin = top-right
+    offset = 12x38
+    notification_limit = 5
+    font = JetBrains Mono 10
+    frame_width = 1
+    frame_color = "#444444"
+    separator_color = frame
+    background = "#000000"
+    foreground = "#dddddd"
+    highlight = "#ffffff"
+    corner_radius = 4
+    padding = 10
+    horizontal_padding = 10
+    icon_position = left
+    progress_bar = true
+
+[urgency_low]
+    timeout = 4
+
+[urgency_normal]
+    timeout = 6
+
+[urgency_critical]
+    timeout = 0
+    frame_color = "#aaaaaa"

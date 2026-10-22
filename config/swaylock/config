@@ -1,0 +1,19 @@
+# Noir Swaylock defaults
+color=000000
+inside-color=121215
+inside-clear-color=222226
+inside-ver-color=222226
+inside-wrong-color=331c22
+ring-color=cfcfcf
+ring-clear-color=ffffff
+ring-ver-color=ffffff
+ring-wrong-color=aa7777
+line-color=242424
+key-hl-color=ffffff
+bs-hl-color=aaaaaa
+text-color=d0d0d0
+font=JetBrains Mono
+font-size=16
+indicator-radius=90
+indicator-thickness=8
+show-failed-attempts

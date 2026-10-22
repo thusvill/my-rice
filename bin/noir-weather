@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cache_file="${XDG_CACHE_HOME:-${HOME}/.cache}/noir-rice/weather.txt"
+mkdir -p "$(dirname -- "$cache_file")"
+if command -v curl >/dev/null 2>&1 && { [[ ! -f "$cache_file" ]] || [[ "$(find "$cache_file" -mmin +15 2>/dev/null)" ]]; }; then
+    weather_location="${NOIR_WEATHER_LOCATION:-}"
+    # Use text condition output rather than wttr.in's emoji condition code.
+    weather_url='https://wttr.in/?format=%C+%t'
+    [[ -n "$weather_location" ]] && weather_url="https://wttr.in/${weather_location// /+}?format=%C+%t"
+    result="$(curl -fsSL --max-time 5 "$weather_url" 2>/dev/null | tr -d '+' | tr -s ' ' | tr -cd '\11\12\15\40-\176')" || result=''
+    [[ -n "$result" ]] && printf '%s\n' "$result" > "$cache_file"
+fi
+cached="$(cat "$cache_file" 2>/dev/null | tr -cd '\11\12\15\40-\176')"
+if [[ -n "$cached" ]]; then
+    lower="${cached,,}"
+    case "$lower" in
+        *thunder*|*storm*) icon='󰖓' ;;
+        *snow*|*sleet*) icon='󰖘' ;;
+        *rain*|*drizzle*) icon='󰖗' ;;
+        *cloud*|*overcast*) icon='󰖐' ;;
+        *clear*|*sunny*) icon='󰖙' ;;
+        *) icon='󰖐' ;;
+    esac
+    temperature="$(printf '%s' "$cached" | grep -oE '[+-]?[0-9]+[CF]' | tail -n 1)"
+    [[ -n "$temperature" ]] && printf '%s %s\n' "$icon" "$temperature" || printf '%s\n' "$icon"
+else
+    printf '󰖐 --\n'
+fi

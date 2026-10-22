@@ -1,0 +1,1370 @@
+#!/usr/bin/python3
+"""Native Noir Settings control center for the Niri rice."""
+
+import os
+import json
+import re
+import shlex
+import shutil
+import subprocess
+import time
+from pathlib import Path
+
+# Niri provides a Wayland display; prefer it over a stale X11 DISPLAY value.
+if os.environ.get("WAYLAND_DISPLAY"):
+    os.environ["GDK_BACKEND"] = "wayland"
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib, GdkPixbuf
+
+
+HOME = Path.home()
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+WAYBAR = CONFIG / "waybar"
+KITTY_CONFIG = CONFIG / "kitty" / "kitty.conf"
+NIRI_CONFIG = CONFIG / "niri" / "config.kdl"
+SWAYLOCK_CONFIG = CONFIG / "swaylock" / "config"
+LOCKSCREEN_STATE = CONFIG / "noir-rice" / "lockscreen.json"
+NVIM_STATE = CONFIG / "noir-rice" / "nvim.json"
+BIN = HOME / ".local" / "bin"
+WALLPAPER_DIR = HOME / "Pictures" / "Wallpapers"
+
+
+CSS = """
+* { font-family: Inter, sans-serif; }
+window, .background { background: #000000; color: #f3f3f5; }
+.header { background: #0c0c0e; border-bottom: 1px solid #222226; }
+.brand { color: #eeeeee; font-family: JetBrains Mono, monospace; font-weight: 600; }
+.muted { color: #888890; }
+.sidebar { background: #0c0c0e; border-right: 1px solid #222226; }
+.section-label { color: #66666e; font-size: 10px; font-weight: 700; }
+button.nav { background: transparent; border: 1px solid transparent; border-radius: 8px; color: #9999a1; padding: 10px 12px; }
+button.nav:hover { background: #18181c; color: #eeeeee; }
+button.nav.active { background: #18181c; border-color: #33333a; color: #ffffff; }
+.content { background: #000000; }
+.title { color: #ffffff; font-size: 22px; font-weight: 700; }
+.subtitle { color: #9999a1; font-size: 12px; }
+.card { background: #121215; border: 1px solid #222226; border-radius: 10px; }
+.card-title { color: #eeeeee; font-weight: 600; }
+.card-copy { color: #9999a1; font-size: 12px; }
+button.action { background: #eeeeee; color: #000000; border: none; border-radius: 6px; padding: 8px 14px; font-weight: 600; }
+button.action:hover { background: #ffffff; }
+button.secondary { background: #18181c; color: #dddddf; border: 1px solid #33333a; border-radius: 6px; padding: 8px 14px; }
+button.secondary:hover { background: #222228; }
+.status { color: #9999a1; font-family: JetBrains Mono, monospace; font-size: 11px; }
+"""
+
+
+class NoirSettings(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="Noir // Rice Control Center")
+        self.set_default_size(1080, 700)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_border_width(0)
+        self.live_timers = {}
+        self.load_css()
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(root)
+        root.pack_start(self.header(), False, False, 0)
+
+        body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        root.pack_start(body, True, True, 0)
+        sidebar = self.sidebar()
+        body.pack_start(sidebar, False, False, 0)
+
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.stack.set_margin_top(28)
+        self.stack.set_margin_bottom(28)
+        self.stack.set_margin_start(32)
+        self.stack.set_margin_end(32)
+        content = Gtk.Box()
+        content.get_style_context().add_class("content")
+        content.pack_start(self.stack, True, True, 0)
+        body.pack_start(content, True, True, 0)
+
+        self.add_page("ascii", "ASCII Wallpaper", "Generate monochrome wallpaper art", self.ascii_page())
+        self.add_page("waybar", "Status Bar", "Configure the Noir Waybar", self.waybar_page())
+        self.add_page("terminal", "Terminal", "Configure the Noir Kitty terminal", self.terminal_page())
+        self.add_page("editor", "Editor", "Configure the Noir Neovim theme", self.editor_page())
+        self.add_page("display", "Displays", "Choose primary, secondary, mirror, or extend", self.display_page())
+        self.add_page("lock", "Lock Screen", "Customize the Swaylock indicator", self.lockscreen_page())
+        self.add_page("niri", "Window Manager", "Niri layout and keybinding configuration", self.niri_page())
+        self.add_page("presets", "Presets & Dotfiles", "Open, inspect, and reload rice configuration", self.presets_page())
+        self.add_page("diagnostics", "Diagnostics", "Validate dependencies and active configuration", self.diagnostics_page())
+        self.show_page("ascii")
+
+    def load_css(self):
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS.encode())
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+    def header(self):
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        header.set_margin_start(16); header.set_margin_end(16)
+        header.set_margin_top(10); header.set_margin_bottom(10)
+        header.get_style_context().add_class("header")
+        terminal = Gtk.Label(label="▣")
+        terminal.get_style_context().add_class("muted")
+        header.pack_start(terminal, False, False, 0)
+        brand = Gtk.Label(label="NOIR // RICE_CONTROL_CENTER", xalign=0)
+        brand.get_style_context().add_class("brand")
+        header.pack_start(brand, True, True, 0)
+        profile = Gtk.Label(label="●  PROFILE: MONOCHROME_NOIR")
+        profile.get_style_context().add_class("muted")
+        header.pack_end(profile, False, False, 0)
+        return header
+
+    def sidebar(self):
+        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        side.set_size_request(235, -1)
+        side.set_margin_top(18); side.set_margin_start(12); side.set_margin_end(12)
+        side.get_style_context().add_class("sidebar")
+        label = Gtk.Label(label="MODULES", xalign=0)
+        label.set_margin_start(12); label.set_margin_bottom(8)
+        label.get_style_context().add_class("section-label")
+        side.pack_start(label, False, False, 0)
+        self.settings_search = Gtk.SearchEntry()
+        self.settings_search.set_placeholder_text("Search settings")
+        self.settings_search.set_margin_start(8); self.settings_search.set_margin_end(8); self.settings_search.set_margin_bottom(8)
+        self.settings_search.connect("search-changed", self.filter_pages)
+        side.pack_start(self.settings_search, False, False, 0)
+        pages = [("ascii", "▧  ASCII Wallpaper"), ("waybar", "▤  Status Bar"), ("terminal", "Terminal"), ("editor", "Editor"),
+                 ("display", "▦  Displays"), ("lock", "◉  Lock Screen"), ("niri", "▦  Window Manager"),
+                 ("presets", "Settings  Presets & Dotfiles"), ("diagnostics", "Diagnostics")]
+        self.nav_buttons = {}
+        self.nav_titles = {}
+        for name, title in pages:
+            button = Gtk.Button(label=title)
+            button.set_halign(Gtk.Align.FILL)
+            button.get_style_context().add_class("nav")
+            button.connect("clicked", lambda _button, page=name: self.show_page(page))
+            self.nav_buttons[name] = button
+            self.nav_titles[name] = title
+            side.pack_start(button, False, False, 0)
+        side.pack_end(self.status_label(), False, False, 12)
+        return side
+
+    def filter_pages(self, entry):
+        query = entry.get_text().strip().lower()
+        active = self.stack.get_visible_child_name()
+        for name, button in self.nav_buttons.items():
+            visible = not query or query in self.nav_titles[name].lower() or name in query
+            if name == active:
+                visible = True
+            button.set_visible(visible)
+
+    def status_label(self):
+        self.status = Gtk.Label(label="Ready", xalign=0)
+        self.status.set_line_wrap(True)
+        self.status.set_margin_start(12)
+        self.status.get_style_context().add_class("status")
+        return self.status
+
+    def add_page(self, name, title, subtitle, widget):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        heading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        title_label = Gtk.Label(label=title, xalign=0)
+        title_label.get_style_context().add_class("title")
+        subtitle_label = Gtk.Label(label=subtitle, xalign=0)
+        subtitle_label.get_style_context().add_class("subtitle")
+        heading.pack_start(title_label, False, False, 0)
+        heading.pack_start(subtitle_label, False, False, 0)
+        page.pack_start(heading, False, False, 0)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_shadow_type(Gtk.ShadowType.NONE)
+        scroller.add(widget)
+        page.pack_start(scroller, True, True, 0)
+        self.stack.add_named(page, name)
+
+    def show_page(self, name):
+        self.stack.set_visible_child_name(name)
+        for page, button in self.nav_buttons.items():
+            button.get_style_context().remove_class("active")
+            if page == name:
+                button.get_style_context().add_class("active")
+
+    def card(self, title, copy, buttons):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_top(14); box.set_margin_bottom(14)
+        box.set_margin_start(16); box.set_margin_end(16)
+        box.get_style_context().add_class("card")
+        name = Gtk.Label(label=title, xalign=0); name.get_style_context().add_class("card-title")
+        desc = Gtk.Label(label=copy, xalign=0); desc.set_line_wrap(True); desc.get_style_context().add_class("card-copy")
+        box.pack_start(name, False, False, 0); box.pack_start(desc, False, False, 0)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for label, callback, primary in buttons:
+            button = Gtk.Button(label=label)
+            button.get_style_context().add_class("action" if primary else "secondary")
+            button.connect("clicked", callback)
+            row.pack_start(button, False, False, 0)
+        box.pack_start(row, False, False, 4)
+        return box
+
+    def page_box(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_vexpand(True)
+        return box
+
+    def launch(self, command, message, env=None):
+        try:
+            subprocess.Popen(command, env=env, start_new_session=True)
+            self.set_status(message)
+        except Exception as error:
+            self.set_status(f"Error: {error}")
+
+    def local(self, name, *args):
+        path = BIN / name
+        return [str(path if path.exists() else name), *args]
+
+    def set_status(self, message):
+        self.status.set_text(message)
+
+    def schedule_live(self, name, callback, delay=650):
+        """Debounce live previews so typing does not restart desktop services."""
+        source_id = self.live_timers.get(name, 0)
+        if source_id:
+            GLib.source_remove(source_id)
+        self.live_timers[name] = GLib.timeout_add(delay, self.run_live, name, callback)
+
+    def run_live(self, name, callback):
+        self.live_timers[name] = 0
+        callback()
+        return False
+
+    def ascii_page(self):
+        box = self.page_box()
+        source_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.ascii_source = Gtk.FileChooserButton(title="Choose source image", action=Gtk.FileChooserAction.OPEN)
+        image_filter = Gtk.FileFilter(); image_filter.set_name("Images")
+        for pattern in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
+            image_filter.add_pattern(pattern)
+        self.ascii_source.add_filter(image_filter)
+        source_row.pack_start(self.ascii_source, True, True, 0)
+        select_button = Gtk.Button(label="Wallpaper selector")
+        select_button.get_style_context().add_class("secondary")
+        select_button.connect("clicked", lambda *_: self.launch(self.local("noir-wallpaper", "select"), "Wallpaper selector opened"))
+        source_row.pack_start(select_button, False, False, 0)
+        apply_button = Gtk.Button(label="Apply selected wallpaper")
+        apply_button.get_style_context().add_class("action")
+        apply_button.connect("clicked", self.apply_selected_wallpaper)
+        source_row.pack_start(apply_button, False, False, 0)
+
+        self.wallpaper_search = Gtk.SearchEntry()
+        self.wallpaper_search.set_placeholder_text("Search available wallpapers…")
+        self.wallpaper_search.connect("search-changed", self.filter_wallpapers)
+        grid_scroll = Gtk.ScrolledWindow()
+        grid_scroll.set_min_content_height(190); grid_scroll.set_max_content_height(240)
+        self.wallpaper_scroll = grid_scroll
+        self.wallpaper_grid = Gtk.FlowBox()
+        self.wallpaper_grid.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.wallpaper_grid.set_max_children_per_line(5); self.wallpaper_grid.set_min_children_per_line(2)
+        self.wallpaper_grid.set_column_spacing(8); self.wallpaper_grid.set_row_spacing(8)
+        grid_scroll.add(self.wallpaper_grid)
+        self.wallpaper_items = []
+        self.wallpaper_render_source_id = 0
+        self.wallpaper_render_queue = []
+        self.wallpaper_adjustment = grid_scroll.get_vadjustment()
+        self.wallpaper_adjustment.connect("value-changed", self.queue_visible_wallpapers)
+        self.wallpaper_adjustment.connect("changed", self.queue_visible_wallpapers)
+
+        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        self.ascii_width = Gtk.SpinButton.new_with_range(40, 260, 10); self.ascii_width.set_value(180)
+        self.ascii_height = Gtk.SpinButton.new_with_range(20, 140, 10); self.ascii_height.set_value(90)
+        controls.pack_start(self.waybar_field("Characters wide", self.ascii_width), True, True, 0)
+        controls.pack_start(self.waybar_field("Characters high", self.ascii_height), True, True, 0)
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        convert = Gtk.Button(label="Convert selected image")
+        convert.get_style_context().add_class("action"); convert.connect("clicked", self.convert_ascii)
+        random_button = Gtk.Button(label="Random ASCII wallpaper")
+        random_button.get_style_context().add_class("secondary"); random_button.connect("clicked", self.random_ascii)
+        favorite = Gtk.Button(label="Favorite selected")
+        favorite.get_style_context().add_class("secondary")
+        favorite.connect("clicked", lambda *_: self.launch(self.local("noir-wallpaper", "favorite", self.ascii_source.get_filename() or ""), "Wallpaper favorite saved"))
+        buttons.pack_start(convert, False, False, 0); buttons.pack_start(random_button, False, False, 0); buttons.pack_start(favorite, False, False, 0)
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        card.set_margin_top(14); card.set_margin_bottom(14); card.set_margin_start(16); card.set_margin_end(16)
+        card.get_style_context().add_class("card")
+        title = Gtk.Label(label="ASCII WALLPAPER GENERATOR", xalign=0); title.get_style_context().add_class("card-title")
+        copy = Gtk.Label(label="Click a thumbnail to select it. Apply the original image or convert it into an ASCII wallpaper.", xalign=0); copy.get_style_context().add_class("card-copy")
+        card.pack_start(title, False, False, 0); card.pack_start(copy, False, False, 0)
+        card.pack_start(source_row, False, False, 0); card.pack_start(controls, False, False, 0); card.pack_start(buttons, False, False, 0)
+        box.pack_start(card, False, False, 0)
+
+        gallery = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        gallery.set_margin_start(16); gallery.set_margin_end(16)
+        gallery_title = Gtk.Label(label="AVAILABLE WALLPAPERS", xalign=0); gallery_title.get_style_context().add_class("card-title")
+        self.gallery_status = Gtk.Label(label="Loading thumbnails…", xalign=0); self.gallery_status.get_style_context().add_class("muted")
+        gallery.pack_start(gallery_title, False, False, 0)
+        gallery.pack_start(self.gallery_status, False, False, 0)
+        gallery.pack_start(self.wallpaper_search, False, False, 0)
+        gallery.pack_start(grid_scroll, True, True, 0)
+        box.pack_start(gallery, False, False, 0)
+        self.populate_wallpapers()
+
+        self.ascii_source.connect("file-set", lambda *_: self.schedule_live("ascii", self.convert_ascii))
+        self.ascii_width.connect("value-changed", lambda *_: self.schedule_live("ascii", self.convert_ascii))
+        self.ascii_height.connect("value-changed", lambda *_: self.schedule_live("ascii", self.convert_ascii))
+
+        preview_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        preview_card.set_margin_start(16); preview_card.set_margin_end(16); preview_card.set_margin_bottom(14)
+        preview_card.get_style_context().add_class("card")
+        preview_title = Gtk.Label(label="ASCII PREVIEW", xalign=0); preview_title.get_style_context().add_class("card-title")
+        self.ascii_preview = Gtk.TextView(); self.ascii_preview.set_editable(False); self.ascii_preview.set_cursor_visible(False)
+        self.ascii_preview.set_monospace(True); self.ascii_preview.set_wrap_mode(Gtk.WrapMode.NONE)
+        self.ascii_preview.set_size_request(-1, 190)
+        scroll = Gtk.ScrolledWindow(); scroll.set_vexpand(True); scroll.add(self.ascii_preview)
+        preview_card.pack_start(preview_title, False, False, 0); preview_card.pack_start(scroll, True, True, 0)
+        box.pack_start(preview_card, True, True, 0)
+        box.pack_start(self.card("WALLPAPER DIRECTORY", "Noir looks for images in ~/Pictures/Wallpapers.", [
+            ("Open folder", lambda *_: self.launch(["kitty", "--directory", str(HOME / "Pictures" / "Wallpapers")], "Wallpaper folder opened"), True),
+            ("Start slideshow", lambda *_: self.launch(self.local("noir-wallpaper", "slideshow", "300"), "Wallpaper slideshow started"), False),
+            ("Stop slideshow", lambda *_: self.launch(self.local("noir-wallpaper", "stop-slideshow"), "Wallpaper slideshow stopped"), False),
+        ]), False, False, 0)
+        return box
+
+    def populate_wallpapers(self):
+        if not WALLPAPER_DIR.exists():
+            self.wallpaper_paths = []
+            self.gallery_status.set_text("Wallpaper directory not found")
+            return
+        self.all_wallpaper_paths = [path for path in sorted(WALLPAPER_DIR.iterdir(), key=lambda item: item.name.lower())
+                                    if path.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")]
+        self.rebuild_wallpaper_grid()
+
+    def rebuild_wallpaper_grid(self):
+        if hasattr(self, "wallpaper_source_id") and self.wallpaper_source_id:
+            GLib.source_remove(self.wallpaper_source_id)
+        if self.wallpaper_render_source_id:
+            GLib.source_remove(self.wallpaper_render_source_id)
+            self.wallpaper_render_source_id = 0
+        query = self.wallpaper_search.get_text().lower().strip()
+        matches = [path for path in self.all_wallpaper_paths if not query or query in path.name.lower()]
+        # Keep the widget count bounded, but do not decode these files yet.  The
+        # gallery renderer below only decodes cards close to the viewport.
+        self.wallpaper_paths = matches[:120]
+        self.wallpaper_items = []
+        for child in self.wallpaper_grid.get_children(): self.wallpaper_grid.remove(child)
+        self.gallery_status.set_text(f"Showing {len(self.wallpaper_paths)} of {len(matches)} matches • search to narrow results")
+        for path in self.wallpaper_paths:
+            button = Gtk.Button()
+            button.set_relief(Gtk.ReliefStyle.NONE)
+            button.set_size_request(150, 112)
+            button.set_tooltip_text(path.name)
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            image = Gtk.Image()
+            image.set_size_request(142, 82)
+            label = Gtk.Label(label=path.stem[:22], xalign=0.5)
+            label.get_style_context().add_class("muted")
+            content.pack_start(image, False, False, 0); content.pack_start(label, False, False, 0)
+            button.add(content)
+            button.connect("clicked", self.choose_wallpaper, str(path))
+            self.wallpaper_grid.add(button)
+            self.wallpaper_items.append({"button": button, "image": image, "path": path,
+                                         "loaded": False, "wanted": False})
+        self.wallpaper_grid.show_all()
+        self.wallpaper_grid.queue_resize()
+        GLib.idle_add(self.queue_visible_wallpapers)
+
+    def queue_visible_wallpapers(self, *_):
+        if not self.wallpaper_items:
+            return False
+        adjustment = self.wallpaper_adjustment
+        top = adjustment.get_value()
+        bottom = top + adjustment.get_page_size()
+        # Preload roughly two rows above/below the viewport, enough for smooth
+        # scrolling without retaining a gallery-sized pixbuf cache.
+        preload = 220
+        wanted = []
+        for item in self.wallpaper_items:
+            allocation = item["button"].get_allocation()
+            item_top = allocation.y
+            item_bottom = item_top + max(allocation.height, 112)
+            should_load = item_bottom >= top - preload and item_top <= bottom + preload
+            item["wanted"] = should_load
+            if should_load and not item["loaded"]:
+                wanted.append(item)
+            elif not should_load and item["loaded"]:
+                # Dropping the Gtk.Image reference releases the decoded pixbuf.
+                item["image"].clear()
+                item["loaded"] = False
+        self.wallpaper_render_queue = wanted
+        if self.wallpaper_render_queue and not self.wallpaper_render_source_id:
+            self.wallpaper_render_source_id = GLib.idle_add(self.render_wallpaper_thumbnail)
+        return False
+
+    def render_wallpaper_thumbnail(self):
+        self.wallpaper_render_source_id = 0
+        while self.wallpaper_render_queue:
+            item = self.wallpaper_render_queue.pop(0)
+            if not item["wanted"] or item["loaded"]:
+                continue
+            try:
+                pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(item["path"]), 142, 82, True)
+                item["image"].set_from_pixbuf(pixbuf)
+                item["loaded"] = True
+            except Exception:
+                item["loaded"] = True
+            # Decode one file per main-loop turn so scrolling and search stay responsive.
+            if self.wallpaper_render_queue:
+                self.wallpaper_render_source_id = GLib.idle_add(self.render_wallpaper_thumbnail)
+            return False
+        return False
+
+    def filter_wallpapers(self, *_):
+        self.rebuild_wallpaper_grid()
+
+    def choose_wallpaper(self, _button, path):
+        self.ascii_source.set_filename(path)
+        self.set_status(f"Selected wallpaper: {Path(path).name}")
+
+    def apply_selected_wallpaper(self, *_):
+        source = self.ascii_source.get_filename()
+        if not source:
+            self.set_status("Select a wallpaper thumbnail first")
+            return
+        self.launch(self.local("noir-wallpaper", "set", source),
+                    f"Applied wallpaper: {Path(source).name}")
+
+    def convert_ascii(self, *_):
+        source = self.ascii_source.get_filename()
+        size = f"{int(self.ascii_width.get_value())}x{int(self.ascii_height.get_value())}"
+        command = self.local("noir-wallpaper", "ascii")
+        if source: command.append(source)
+        env = os.environ.copy(); env["NOIR_ASCII_SIZE"] = size
+        self.launch(command, "Rendering ASCII wallpaper", env=env)
+        GLib.timeout_add(1200, self.refresh_ascii_preview)
+
+    def random_ascii(self, *_):
+        self.ascii_source.unselect_all()
+        self.convert_ascii()
+
+    def refresh_ascii_preview(self):
+        preview = HOME / ".cache" / "noir-rice" / "ascii-wallpaper.txt"
+        try:
+            text = preview.read_text()
+            self.ascii_preview.get_buffer().set_text(text)
+            self.set_status("ASCII preview updated")
+        except OSError:
+            self.set_status("ASCII conversion is still running or failed")
+        return False
+
+    def waybar_field(self, label, widget):
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        row.set_margin_top(5); row.set_margin_bottom(5)
+        text = Gtk.Label(label=label, xalign=0)
+        text.set_size_request(190, -1)
+        text.get_style_context().add_class("card-copy")
+        row.pack_start(text, False, False, 0)
+        row.pack_start(widget, True, True, 0)
+        return row
+
+    def waybar_config(self):
+        try:
+            return json.loads(WAYBAR.joinpath("config.jsonc").read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def kitty_style(self):
+        try:
+            return KITTY_CONFIG.read_text()
+        except OSError:
+            return ""
+
+    def kitty_value(self, text, key, fallback):
+        match = re.search(rf"(?m)^{re.escape(key)}\s+([^\s]+)", text)
+        return match.group(1) if match else fallback
+
+    def terminal_page(self):
+        text = self.kitty_style()
+        box = self.page_box()
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        card.set_margin_top(14); card.set_margin_bottom(14); card.set_margin_start(16); card.set_margin_end(16)
+        card.get_style_context().add_class("card")
+        title = Gtk.Label(label="LIVE KITTY CONFIGURATION", xalign=0); title.get_style_context().add_class("card-title")
+        copy = Gtk.Label(label="Terminal changes save to Kitty and reload live when supported.", xalign=0); copy.get_style_context().add_class("card-copy")
+        card.pack_start(title, False, False, 0); card.pack_start(copy, False, False, 0)
+        self.kitty_font_size = Gtk.SpinButton.new_with_range(8, 32, 0.5)
+        self.kitty_font_size.set_value(float(self.kitty_value(text, "font_size", "10.5")))
+        self.kitty_padding = Gtk.SpinButton.new_with_range(0, 64, 1)
+        self.kitty_padding.set_value(float(self.kitty_value(text, "window_padding_width", "0")))
+        self.kitty_background_widget, self.kitty_background = self.color_control(self.kitty_value(text, "background", "#000000"))
+        self.kitty_foreground_widget, self.kitty_foreground = self.color_control(self.kitty_value(text, "foreground", "#d0d0d0"))
+        self.kitty_selection_widget, self.kitty_selection = self.color_control(self.kitty_value(text, "selection_background", "#2a2a2a"))
+        for label, widget in (("Font size", self.kitty_font_size), ("Window padding", self.kitty_padding),
+                              ("Background", self.kitty_background_widget), ("Foreground", self.kitty_foreground_widget),
+                              ("Selection background", self.kitty_selection_widget)):
+            card.pack_start(self.waybar_field(label, widget), False, False, 0)
+        preview_title = Gtk.Label(label="TERMINAL PREVIEW", xalign=0); preview_title.get_style_context().add_class("card-title")
+        self.kitty_preview = Gtk.DrawingArea(); self.kitty_preview.set_size_request(-1, 130)
+        self.kitty_preview.connect("draw", self.draw_kitty_preview)
+        card.pack_start(preview_title, False, False, 4); card.pack_start(self.kitty_preview, False, False, 0)
+        box.pack_start(card, False, False, 0)
+        for widget in (self.kitty_font_size, self.kitty_padding):
+            widget.connect("value-changed", lambda *_: self.schedule_live("kitty", self.apply_kitty, 450))
+            widget.connect("value-changed", lambda *_: self.kitty_preview.queue_draw())
+        for widget in (self.kitty_background, self.kitty_foreground, self.kitty_selection):
+            widget.connect("changed", lambda *_: self.schedule_live("kitty", self.apply_kitty, 700))
+            widget.connect("changed", lambda *_: self.kitty_preview.queue_draw())
+        return box
+
+    def draw_kitty_preview(self, _area, context):
+        allocation = self.kitty_preview.get_allocation()
+        width, height = allocation.width, allocation.height
+        bg = self.preview_color(self.kitty_background, "000000")
+        fg = self.preview_color(self.kitty_foreground, "d0d0d0")
+        selection = self.preview_color(self.kitty_selection, "2a2a2a")
+        context.set_source_rgba(*bg); context.paint()
+        context.set_source_rgba(*selection); context.rectangle(12, 12, width * 0.72, 26); context.fill()
+        context.set_source_rgba(*fg); context.set_font_size(max(10, self.kitty_font_size.get_value()))
+        context.select_font_face("JetBrains Mono")
+        context.move_to(22, 30); context.show_text("noir@desktop  ~  $ nvim")
+        context.move_to(22, 68); context.show_text("terminal colors and spacing preview")
+        context.move_to(22, 104); context.show_text("▌")
+        return False
+
+    def apply_kitty(self):
+        try:
+            text = self.kitty_style()
+            colors = (self.kitty_background, self.kitty_foreground, self.kitty_selection)
+            for field in colors:
+                if not re.fullmatch(r"#[0-9a-fA-F]{6}", field.get_text().strip()):
+                    raise ValueError("Kitty colors must be six-digit hex values")
+            replacements = {
+                r"(?m)^font_size\s+\S+": f"font_size {self.kitty_font_size.get_value():g}",
+                r"(?m)^window_padding_width\s+\S+": f"window_padding_width {int(self.kitty_padding.get_value())}",
+                r"(?m)^background\s+#[0-9a-fA-F]{6}": f"background {self.kitty_background.get_text().strip()}",
+                r"(?m)^foreground\s+#[0-9a-fA-F]{6}": f"foreground {self.kitty_foreground.get_text().strip()}",
+                r"(?m)^selection_background\s+#[0-9a-fA-F]{6}": f"selection_background {self.kitty_selection.get_text().strip()}",
+            }
+            for pattern, replacement in replacements.items():
+                text = re.sub(pattern, replacement, text, count=1)
+            KITTY_CONFIG.parent.mkdir(parents=True, exist_ok=True); KITTY_CONFIG.write_text(text)
+            result = subprocess.run(["kitty", "@", "load-config"], capture_output=True, text=True)
+            self.set_status("Kitty configuration saved and reloaded" if result.returncode == 0 else "Kitty configuration saved; reload existing terminals with Ctrl+Shift+F5")
+        except Exception as error:
+            self.set_status(f"Kitty error: {error}")
+
+    def editor_page(self):
+        state = {}
+        try:
+            state = json.loads(NVIM_STATE.read_text())
+        except (OSError, json.JSONDecodeError):
+            pass
+        box = self.page_box()
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        card.set_margin_top(14); card.set_margin_bottom(14); card.set_margin_start(16); card.set_margin_end(16)
+        card.get_style_context().add_class("card")
+        title = Gtk.Label(label="NOIR NEOVIM THEME", xalign=0); title.get_style_context().add_class("card-title")
+        copy = Gtk.Label(label="These values are shared with the LazyVim Noir colorscheme and apply to new Neovim sessions.", xalign=0)
+        copy.set_line_wrap(True); copy.get_style_context().add_class("card-copy")
+        card.pack_start(title, False, False, 0); card.pack_start(copy, False, False, 0)
+        self.nvim_background_widget, self.nvim_background = self.color_control(state.get("background", "#000000"))
+        self.nvim_accent_widget, self.nvim_accent = self.color_control(state.get("accent", "#cfcfcf"))
+        self.nvim_comment_widget, self.nvim_comment = self.color_control(state.get("comment", "#66666e"))
+        self.nvim_transparent = Gtk.CheckButton(label="Transparent editor background")
+        self.nvim_transparent.set_active(bool(state.get("transparent", False)))
+        self.nvim_cursorline = Gtk.CheckButton(label="Highlight cursor line")
+        self.nvim_cursorline.set_active(state.get("cursorline", True))
+        self.nvim_numbers = Gtk.CheckButton(label="Show relative line numbers")
+        self.nvim_numbers.set_active(state.get("relative_numbers", False))
+        for label, widget in (("Editor background", self.nvim_background_widget), ("Accent", self.nvim_accent_widget),
+                              ("Comments", self.nvim_comment_widget)):
+            card.pack_start(self.waybar_field(label, widget), False, False, 0)
+        for widget in (self.nvim_transparent, self.nvim_cursorline, self.nvim_numbers):
+            card.pack_start(widget, False, False, 4)
+        apply_button = Gtk.Button(label="Save Neovim theme")
+        apply_button.get_style_context().add_class("action"); apply_button.connect("clicked", self.apply_editor)
+        card.pack_start(apply_button, False, False, 6)
+        box.pack_start(card, False, False, 0)
+        for widget in (self.nvim_background, self.nvim_accent, self.nvim_comment):
+            widget.connect("changed", lambda *_: self.schedule_live("nvim", self.apply_editor, 700))
+        for widget in (self.nvim_transparent, self.nvim_cursorline, self.nvim_numbers):
+            widget.connect("toggled", lambda *_: self.schedule_live("nvim", self.apply_editor, 300))
+        return box
+
+    def apply_editor(self, *_):
+        colors = (self.nvim_background, self.nvim_accent, self.nvim_comment)
+        if any(not re.fullmatch(r"#[0-9a-fA-F]{6}", field.get_text().strip()) for field in colors):
+            self.set_status("Neovim colors must be six-digit hex values")
+            return
+        try:
+            NVIM_STATE.parent.mkdir(parents=True, exist_ok=True)
+            NVIM_STATE.write_text(json.dumps({
+                "background": self.nvim_background.get_text().strip(),
+                "accent": self.nvim_accent.get_text().strip(),
+                "comment": self.nvim_comment.get_text().strip(),
+                "transparent": self.nvim_transparent.get_active(),
+                "cursorline": self.nvim_cursorline.get_active(),
+                "relative_numbers": self.nvim_numbers.get_active(),
+            }, indent=2) + "\n")
+            self.set_status("Neovim theme saved; restart Neovim to apply")
+        except OSError as error:
+            self.set_status(f"Neovim theme error: {error}")
+
+    def waybar_style(self):
+        try:
+            return WAYBAR.joinpath("style.css").read_text()
+        except OSError:
+            return ""
+
+    def entry(self, value, width=300):
+        field = Gtk.Entry()
+        field.set_text(str(value))
+        field.set_width_chars(max(12, width // 9))
+        return field
+
+    def color_control(self, value, allow_alpha=False):
+        """Return a hex entry plus a native GTK color picker/swatch."""
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        field = self.entry(value, 120)
+        picker = Gtk.ColorButton()
+        picker.set_property("use-alpha", allow_alpha)
+        picker.set_tooltip_text("Choose a color")
+
+        def sync_picker(*_):
+            raw = field.get_text().strip().lstrip("#")
+            if len(raw) not in (6, 8) or any(char not in "0123456789abcdefABCDEF" for char in raw):
+                return
+            rgba = Gdk.RGBA()
+            if rgba.parse("#" + raw):
+                picker.set_rgba(rgba)
+
+        def sync_entry(*_):
+            rgba = picker.get_rgba()
+            channels = tuple(max(0, min(255, round(channel * 255)))
+                              for channel in (rgba.red, rgba.green, rgba.blue))
+            text = "#%02x%02x%02x" % channels
+            if allow_alpha:
+                text += "%02x" % max(0, min(255, round(rgba.alpha * 255)))
+            field.set_text(text)
+
+        field.connect("changed", sync_picker)
+        picker.connect("color-set", sync_entry)
+        sync_picker()
+        row.pack_start(field, True, True, 0)
+        row.pack_start(picker, False, False, 0)
+        return row, field
+
+    def css_rgba(self, hex_color, opacity):
+        raw = hex_color.lstrip("#")
+        red, green, blue = (int(raw[index:index + 2], 16) for index in (0, 2, 4))
+        return f"rgba({red}, {green}, {blue}, {opacity:.2f})"
+
+    def waybar_page(self):
+        config = self.waybar_config()
+        clock = config.get("clock", {})
+        center = config.get("modules-center", [])
+        right = config.get("modules-right", [])
+        style = self.waybar_style()
+        match = re.search(r"window#waybar\s*\{([^}]*)\}", style, re.S)
+        block = match.group(1) if match else ""
+        font_match = re.search(r"font-size:\s*(\d+)px", style)
+        bg_match = re.search(r"background:\s*(#[0-9a-fA-F]{6}|rgba\([^)]*\))", block)
+        text_match = re.search(r"color:\s*(#[0-9a-fA-F]{6})", block)
+        highlight_match = re.search(r"#workspaces button\.focused[^\{]*\{[^}]*background:\s*(#[0-9a-fA-F]{6})", style, re.S)
+        surface_match = re.search(r"#workspaces button:hover\s*\{[^}]*background:\s*(#[0-9a-fA-F]{6})", style, re.S)
+        opacity = 100
+        background = bg_match.group(1) if bg_match else "#000000"
+        if background.startswith("rgba"):
+            parts = re.search(r"rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*([0-9.]+)", background)
+            opacity = round(float(parts.group(1)) * 100) if parts else 100
+            rgb = re.search(r"rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", background)
+            background = "#%02x%02x%02x" % tuple(int(value) for value in rgb.groups()) if rgb else "#000000"
+
+        box = self.page_box()
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        card.set_margin_top(14); card.set_margin_bottom(14); card.set_margin_start(16); card.set_margin_end(16)
+        card.get_style_context().add_class("card")
+        title = Gtk.Label(label="LIVE WAYBAR CONFIGURATION", xalign=0)
+        title.get_style_context().add_class("card-title")
+        copy = Gtk.Label(label="Changes preview live in the active Noir Waybar after a short pause.", xalign=0)
+        copy.get_style_context().add_class("card-copy")
+        card.pack_start(title, False, False, 0); card.pack_start(copy, False, False, 0)
+
+        self.wb_height = Gtk.SpinButton.new_with_range(24, 64, 1)
+        self.wb_height.set_value(config.get("height", 32))
+        self.wb_spacing = Gtk.SpinButton.new_with_range(0, 24, 1)
+        self.wb_spacing.set_value(config.get("spacing", 8))
+        self.wb_font_size = Gtk.SpinButton.new_with_range(8, 20, 1)
+        self.wb_font_size.set_value(int(font_match.group(1)) if font_match else 11)
+        self.wb_clock = self.entry(clock.get("format", "{:%H:%M %a, %b %d}"), 360)
+        self.wb_weather = self.entry(os.environ.get("NOIR_WEATHER_LOCATION", "Colombo"), 220)
+        for label, widget in (("Bar height", self.wb_height), ("Module spacing", self.wb_spacing),
+                              ("Font size", self.wb_font_size), ("Clock format", self.wb_clock),
+                              ("Weather location", self.wb_weather)):
+            card.pack_start(self.waybar_field(label, widget), False, False, 0)
+        box.pack_start(card, False, False, 0)
+
+        theme_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        theme_card.set_margin_top(0); theme_card.set_margin_bottom(14); theme_card.set_margin_start(16); theme_card.set_margin_end(16)
+        theme_card.get_style_context().add_class("card")
+        theme_title = Gtk.Label(label="LIVE THEME VARIABLES", xalign=0); theme_title.get_style_context().add_class("card-title")
+        theme_copy = Gtk.Label(label="Adjust colors, opacity, and compositor blur with native color previews.", xalign=0); theme_copy.get_style_context().add_class("card-copy")
+        theme_card.pack_start(theme_title, False, False, 0); theme_card.pack_start(theme_copy, False, False, 0)
+        self.wb_background_widget, self.wb_background = self.color_control(background)
+        self.wb_text_widget, self.wb_text = self.color_control(text_match.group(1) if text_match else "#f3f3f5")
+        self.wb_highlight_widget, self.wb_highlight = self.color_control(highlight_match.group(1) if highlight_match else "#222226")
+        self.wb_surface_widget, self.wb_surface = self.color_control(surface_match.group(1) if surface_match else "#18181c")
+        theme_defaults = {
+            "border": "#222226", "workspace_inactive": "#66666e", "workspace_active": "#ffffff",
+            "workspace_hover": "#ffffff", "active_border": "#3a3a42", "layout": "#777780",
+            "clock": "#f3f3f5", "weather": "#c2c2c8", "notifications": "#9999a1",
+            "controls": "#a9a9b1", "resources": "#8f8f98", "power": "#eeeeee",
+            "settings": "#bdbdbd", "settings_hover": "#ffffff", "hover_surface": "#1a1a1a",
+            "warning": "#cfcfcf", "critical": "#ffffff",
+        }
+        self.wb_theme = {}
+        theme_labels = {
+            "border": "Bar border", "workspace_inactive": "Workspace inactive", "workspace_active": "Workspace active",
+            "workspace_hover": "Workspace hover", "active_border": "Active border", "layout": "Layout icon",
+            "clock": "Clock", "weather": "Weather", "notifications": "Notifications", "controls": "Audio / network",
+            "resources": "CPU / memory", "power": "Power icon", "settings": "Settings icon", "settings_hover": "Settings hover",
+            "hover_surface": "Hover surface", "warning": "Warning", "critical": "Critical",
+        }
+        theme_patterns = {
+            "border": r"window#waybar\s*\{[^}]*border:\s*(#[0-9a-fA-F]{6})",
+            "workspace_inactive": r"#workspaces button\s*\{[^}]*color:\s*(#[0-9a-fA-F]{6})",
+            "workspace_active": r"#workspaces button\.focused[^}]*color:\s*(#[0-9a-fA-F]{6})",
+            "workspace_hover": r"#workspaces button:hover\s*\{[^}]*color:\s*(#[0-9a-fA-F]{6})",
+            "active_border": r"#workspaces button\.focused[^}]*border-color:\s*(#[0-9a-fA-F]{6})",
+            "layout": r"#custom-layout\s*\{[^}]*color:\s*(#[0-9a-fA-F]{6})",
+            "clock": r"#clock\s*\{[^}]*color:\s*(#[0-9a-fA-F]{6})",
+            "weather": r"#custom-weather\s*\{[^}]*color:\s*(#[0-9a-fA-F]{6})",
+            "notifications": r"#custom-notifications\s*\{[^}]*color:\s*(#[0-9a-fA-F]{6})",
+            "controls": r"#pulseaudio, #pulseaudio\\#microphone, #network, #battery\s*\{[^}]*color:\s*(#[0-9a-fA-F]{6})",
+            "resources": r"#cpu, #memory, #disk\s*\{[^}]*color:\s*(#[0-9a-fA-F]{6})",
+            "power": r"#custom-power\s*\{[^}]*color:\s*(#[0-9a-fA-F]{6})",
+            "settings": r"#custom-settings\s*\{[^}]*color:\s*(#[0-9a-fA-F]{6})",
+            "settings_hover": r"#custom-settings:hover\s*\{[^}]*color:\s*(#[0-9a-fA-F]{6})",
+            "hover_surface": r"#custom-settings:hover\s*\{[^}]*background:\s*(#[0-9a-fA-F]{6})",
+            "warning": r"#battery\.warning\s*\{[^}]*color:\s*(#[0-9a-fA-F]{6})",
+            "critical": r"#battery\.critical\s*\{[^}]*color:\s*(#[0-9a-fA-F]{6})",
+        }
+        for key, pattern in theme_patterns.items():
+            found = re.search(pattern, style, re.S)
+            if found:
+                theme_defaults[key] = found.group(1)
+        for key, default in theme_defaults.items():
+            widget, field = self.color_control(default)
+            self.wb_theme[key] = field
+            theme_card.pack_start(self.waybar_field(theme_labels[key], widget), False, False, 0)
+        self.wb_opacity = Gtk.SpinButton.new_with_range(10, 100, 1); self.wb_opacity.set_value(opacity)
+        self.wb_blur = Gtk.CheckButton(label="Enable compositor blur")
+        blur_match = re.search(r"background-effect\s*\{[^}]*\bblur\s+(true|false)", Path(NIRI_CONFIG).read_text() if NIRI_CONFIG.exists() else "", re.S)
+        self.wb_blur.set_active(bool(blur_match and blur_match.group(1) == "true"))
+        for label, widget in (("Bar background", self.wb_background_widget), ("Bar text", self.wb_text_widget),
+                              ("Highlight", self.wb_highlight_widget), ("Surface", self.wb_surface_widget),
+                              ("Background opacity", self.wb_opacity)):
+            theme_card.pack_start(self.waybar_field(label, widget), False, False, 0)
+        theme_card.pack_start(self.wb_blur, False, False, 6)
+        preview_title = Gtk.Label(label="WAYBAR PREVIEW", xalign=0); preview_title.get_style_context().add_class("card-title")
+        self.waybar_preview = Gtk.DrawingArea(); self.waybar_preview.set_size_request(-1, 86)
+        self.waybar_preview.connect("draw", self.draw_waybar_preview)
+        theme_card.pack_start(preview_title, False, False, 4)
+        theme_card.pack_start(self.waybar_preview, False, False, 0)
+        box.pack_start(theme_card, False, False, 0)
+
+        modules = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
+        modules.set_margin_start(16); modules.set_margin_end(16)
+        self.wb_workspaces = Gtk.CheckButton(label="Workspaces")
+        self.wb_workspaces.set_active("niri/workspaces" in config.get("modules-left", []))
+        self.wb_weather_toggle = Gtk.CheckButton(label="Weather")
+        self.wb_weather_toggle.set_active("custom/weather" in center)
+        self.wb_notifications = Gtk.CheckButton(label="Notifications")
+        self.wb_notifications.set_active("custom/notifications" in center)
+        self.wb_tray = Gtk.CheckButton(label="System tray")
+        self.wb_tray.set_active("tray" in right)
+        self.wb_cpu = Gtk.CheckButton(label="CPU")
+        self.wb_cpu.set_active("cpu" in right)
+        self.wb_memory = Gtk.CheckButton(label="RAM")
+        self.wb_memory.set_active("memory" in right)
+        self.wb_disk = Gtk.CheckButton(label="Disk")
+        self.wb_disk.set_active("disk" in right)
+        for button in (self.wb_workspaces, self.wb_weather_toggle, self.wb_notifications, self.wb_tray, self.wb_cpu, self.wb_memory, self.wb_disk):
+            modules.pack_start(button, False, False, 0)
+        box.pack_start(modules, False, False, 5)
+
+        # Every Waybar field is a live preview.  Entry edits are debounced;
+        # toggles and numeric controls feel immediate without thrashing Waybar.
+        for widget in (self.wb_height, self.wb_spacing, self.wb_font_size):
+            widget.connect("value-changed", lambda *_: self.schedule_live("waybar", self.apply_waybar, 500))
+        for widget in (self.wb_clock, self.wb_weather, self.wb_background, self.wb_text, self.wb_highlight, self.wb_surface, *self.wb_theme.values()):
+            widget.connect("changed", lambda *_: self.schedule_live("waybar", self.apply_waybar, 700))
+            widget.connect("changed", lambda *_: self.waybar_preview.queue_draw())
+        self.wb_opacity.connect("value-changed", lambda *_: self.schedule_live("waybar", self.apply_waybar, 450))
+        self.wb_blur.connect("toggled", lambda *_: self.schedule_live("waybar", self.apply_waybar, 300))
+        self.wb_opacity.connect("value-changed", lambda *_: self.waybar_preview.queue_draw())
+        self.wb_blur.connect("toggled", lambda *_: self.waybar_preview.queue_draw())
+        for widget in (self.wb_workspaces, self.wb_weather_toggle, self.wb_notifications,
+                       self.wb_tray, self.wb_cpu, self.wb_memory, self.wb_disk):
+            widget.connect("toggled", lambda *_: self.schedule_live("waybar", self.apply_waybar, 250))
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        actions.set_margin_start(16)
+        apply_button = Gtk.Button(label="Apply Waybar changes")
+        apply_button.get_style_context().add_class("action")
+        apply_button.connect("clicked", self.apply_waybar)
+        actions.pack_start(apply_button, False, False, 0)
+        box.pack_start(actions, False, False, 0)
+        return box
+
+    def rounded_rect(self, context, x, y, width, height, radius):
+        context.new_sub_path()
+        context.arc(x + width - radius, y + radius, radius, -1.5708, 0)
+        context.arc(x + width - radius, y + height - radius, radius, 0, 1.5708)
+        context.arc(x + radius, y + height - radius, radius, 1.5708, 3.1416)
+        context.arc(x + radius, y + radius, radius, 3.1416, 4.7124)
+        context.close_path()
+
+    def draw_waybar_preview(self, _area, context):
+        allocation = self.waybar_preview.get_allocation()
+        width, height = allocation.width, allocation.height
+        context.set_source_rgb(0, 0, 0); context.paint()
+        background = self.preview_color(self.wb_background, "000000")
+        text = self.preview_color(self.wb_text, "f3f3f5")
+        highlight = self.preview_color(self.wb_highlight, "222226")
+        border = self.preview_color(self.wb_theme["border"], "222226")
+        opacity = float(self.wb_opacity.get_value()) / 100
+        bar_height = min(42, max(20, float(self.wb_height.get_value())))
+        x, y, w = 10, (height - bar_height) / 2, width - 20
+        self.rounded_rect(context, x, y, w, bar_height, 5)
+        context.set_source_rgba(background[0], background[1], background[2], opacity); context.fill_preserve()
+        context.set_line_width(1); context.set_source_rgba(*border); context.stroke()
+        context.set_source_rgba(*highlight)
+        for index in range(5):
+            px = x + 8 + index * 24
+            self.rounded_rect(context, px, y + 6, 20, bar_height - 12, 4); context.fill()
+        context.set_source_rgba(*text); context.set_font_size(10)
+        context.move_to(x + 140, y + bar_height / 2 + 4); context.show_text("12:45  Weather  CPU  RAM  Audio  Network")
+        return False
+
+    def apply_waybar(self, *_):
+        try:
+            config = self.waybar_config()
+            config["height"] = int(self.wb_height.get_value())
+            config["spacing"] = int(self.wb_spacing.get_value())
+            config.setdefault("clock", {})["format"] = self.wb_clock.get_text()
+            weather_location = self.wb_weather.get_text().strip() or "Colombo"
+            config.setdefault("custom/weather", {})["exec"] = (
+                f"NOIR_WEATHER_LOCATION={shlex.quote(weather_location)} noir-weather"
+            )
+            left = [item for item in config.get("modules-left", []) if item != "niri/workspaces"]
+            if self.wb_workspaces.get_active(): left.insert(0, "niri/workspaces")
+            config["modules-left"] = left
+            center = [item for item in config.get("modules-center", []) if item not in ("custom/weather", "custom/notifications")]
+            if self.wb_weather_toggle.get_active(): center.insert(1 if center else 0, "custom/weather")
+            if self.wb_notifications.get_active(): center.append("custom/notifications")
+            config["modules-center"] = center
+            right = [item for item in config.get("modules-right", []) if item not in ("tray", "cpu", "memory", "disk")]
+            if self.wb_tray.get_active(): right.insert(0, "tray")
+            if self.wb_cpu.get_active(): right.append("cpu")
+            if self.wb_memory.get_active(): right.append("memory")
+            if self.wb_disk.get_active(): right.append("disk")
+            config["modules-right"] = right
+            WAYBAR.joinpath("config.jsonc").write_text(json.dumps(config, indent=4) + "\n")
+
+            css = self.waybar_style()
+            css = re.sub(r"(\*\s*\{.*?font-size:\s*)\d+px", rf"\g<1>{int(self.wb_font_size.get_value())}px", css, count=1, flags=re.S)
+            colors = {
+                "background": self.wb_background.get_text().strip(),
+                "text": self.wb_text.get_text().strip(),
+                "highlight": self.wb_highlight.get_text().strip(),
+                "surface": self.wb_surface.get_text().strip(),
+            }
+            palette = {key: field.get_text().strip() for key, field in self.wb_theme.items()}
+            for name, value in colors.items():
+                if not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+                    raise ValueError(f"{name.title()} must be a six-digit color such as #000000")
+            for name, value in palette.items():
+                if not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+                    raise ValueError(f"{name.replace('_', ' ').title()} must be a six-digit color")
+            opacity = int(self.wb_opacity.get_value()) / 100
+            bg = self.css_rgba(colors["background"], opacity)
+            css = re.sub(r"(window#waybar\s*\{[^}]*?background:\s*)(?:#[0-9a-fA-F]{6}|rgba\([^)]*\))",
+                         rf"\g<1>{bg}", css, count=1, flags=re.S)
+            css = re.sub(r"(window#waybar\s*\{[^}]*?border:\s*)#[0-9a-fA-F]{6}",
+                         rf"\g<1>{palette['border']}", css, count=1, flags=re.S)
+            css = re.sub(r"(window#waybar\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}",
+                         rf"\g<1>{colors['text']}", css, count=1, flags=re.S)
+            css = re.sub(r"(#workspaces button\.focused[^\{]*\{[^}]*?background:\s*)#[0-9a-fA-F]{6}",
+                         rf"\g<1>{colors['highlight']}", css, count=1, flags=re.S)
+            css = re.sub(r"(#workspaces button:hover\s*\{[^}]*?background:\s*)#[0-9a-fA-F]{6}",
+                         rf"\g<1>{palette['hover_surface']}", css, count=1, flags=re.S)
+            replacements = {
+                r"(#workspaces button\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": palette["workspace_inactive"],
+                r"(#workspaces button\.focused[^\{]*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": palette["workspace_active"],
+                r"(#workspaces button\.focused[^\{]*\{[^}]*?border-color:\s*)#[0-9a-fA-F]{6}": palette["active_border"],
+                r"(#workspaces button:hover\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": palette["workspace_hover"],
+                r"(#custom-layout\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": palette["layout"],
+                r"(#clock\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": palette["clock"],
+                r"(#custom-weather\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": palette["weather"],
+                r"(#custom-notifications\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": palette["notifications"],
+                r"(#pulseaudio, #pulseaudio\\#microphone, #network, #battery\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": palette["controls"],
+                r"(#cpu, #memory, #disk\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": palette["resources"],
+                r"(#custom-power\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": palette["power"],
+                r"(#custom-settings\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": palette["settings"],
+                r"(#custom-settings:hover\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": palette["settings_hover"],
+                r"(#custom-settings:hover\s*\{[^}]*?background:\s*)#[0-9a-fA-F]{6}": palette["hover_surface"],
+                r"(#battery\.warning\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": palette["warning"],
+                r"(#battery\.critical\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": palette["critical"],
+            }
+            for pattern, value in replacements.items():
+                css = re.sub(pattern, rf"\g<1>{value}", css, count=1, flags=re.S)
+            WAYBAR.joinpath("style.css").write_text(css)
+            niri_text = NIRI_CONFIG.read_text()
+            blur = "true" if self.wb_blur.get_active() else "false"
+            niri_text = re.sub(r"(background-effect\s*\{[^}]*\bblur\s+)\w+",
+                               rf"\g<1>{blur}", niri_text, count=1, flags=re.S)
+            NIRI_CONFIG.write_text(niri_text)
+            self.reload_waybar()
+            self.launch(["niri", "msg", "action", "load-config-file"], "Waybar theme and blur applied live")
+        except Exception as error:
+            self.set_status(f"Waybar error: {error}")
+
+    def reload_waybar(self):
+        subprocess.run(["pkill", "-x", "waybar"], stderr=subprocess.DEVNULL)
+        self.launch(["waybar"], "Waybar reloaded")
+
+    def toggle_waybar(self):
+        if subprocess.run(["pgrep", "-x", "waybar"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+            subprocess.run(["pkill", "-x", "waybar"])
+            self.set_status("Waybar hidden")
+        else:
+            self.launch(["waybar"], "Waybar shown")
+
+    def display_page(self):
+        box = self.page_box()
+        box.pack_start(self.card("DISPLAY PROFILES", "Open the Noir display selector to apply primary-only, secondary-only, mirrored, or extended layouts.", [
+            ("Open display menu", lambda *_: self.launch(self.local("noir-display-menu"), "Display menu opened"), True),
+            ("Fine-tune displays", lambda *_: self.launch(["nwg-displays"], "Detailed display settings opened"), False),
+        ]), False, False, 0)
+        box.pack_start(self.card("CURRENT COMPOSITOR", "Display changes are applied through Niri IPC and take effect immediately.", [
+            ("Reload Niri config", lambda *_: self.launch(["niri", "msg", "action", "load-config-file"], "Niri configuration reloaded"), False),
+        ]), False, False, 0)
+        return box
+
+    def lockscreen_page(self):
+        values = {}
+        try:
+            for line in SWAYLOCK_CONFIG.read_text().splitlines():
+                if "=" in line and not line.lstrip().startswith("#"):
+                    key, value = line.split("=", 1); values[key.strip()] = value.strip()
+        except OSError:
+            pass
+        lock_state = {}
+        try:
+            lock_state = json.loads(LOCKSCREEN_STATE.read_text())
+        except (OSError, json.JSONDecodeError):
+            pass
+        box = self.page_box()
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        card.set_margin_top(14); card.set_margin_bottom(14); card.set_margin_start(16); card.set_margin_end(16)
+        card.get_style_context().add_class("card")
+        title = Gtk.Label(label="LOCK SCREEN APPEARANCE", xalign=0); title.get_style_context().add_class("card-title")
+        copy = Gtk.Label(label="Changes save live; use Lock now to preview the indicator on your session.", xalign=0); copy.get_style_context().add_class("card-copy")
+        card.pack_start(title, False, False, 0); card.pack_start(copy, False, False, 0)
+        self.lock_background_widget, self.lock_background = self.color_control(values.get("color", "000000"), True)
+        self.lock_inside_widget, self.lock_inside = self.color_control(values.get("inside-color", "121215"), True)
+        self.lock_inside_clear_widget, self.lock_inside_clear = self.color_control(values.get("inside-clear-color", "222226"), True)
+        self.lock_inside_ver_widget, self.lock_inside_ver = self.color_control(values.get("inside-ver-color", "222226"), True)
+        self.lock_inside_wrong_widget, self.lock_inside_wrong = self.color_control(values.get("inside-wrong-color", "331c22"), True)
+        self.lock_ring_widget, self.lock_ring = self.color_control(values.get("ring-color", "cfcfcf"), True)
+        self.lock_ring_clear_widget, self.lock_ring_clear = self.color_control(values.get("ring-clear-color", "ffffff"), True)
+        self.lock_ring_ver_widget, self.lock_ring_ver = self.color_control(values.get("ring-ver-color", "ffffff"), True)
+        self.lock_ring_wrong_widget, self.lock_ring_wrong = self.color_control(values.get("ring-wrong-color", "aa7777"), True)
+        self.lock_line_widget, self.lock_line = self.color_control(values.get("line-color", "242424"), True)
+        self.lock_key_hl_widget, self.lock_key_hl = self.color_control(values.get("key-hl-color", "ffffff"), True)
+        self.lock_bs_hl_widget, self.lock_bs_hl = self.color_control(values.get("bs-hl-color", "aaaaaa"), True)
+        self.lock_text_widget, self.lock_text = self.color_control(values.get("text-color", "d0d0d0"), True)
+        self.lock_font = self.entry(values.get("font", "JetBrains Mono"), 180)
+        self.lock_size = Gtk.SpinButton.new_with_range(8, 48, 1); self.lock_size.set_value(float(values.get("font-size", "16")))
+        self.lock_radius = Gtk.SpinButton.new_with_range(20, 180, 5); self.lock_radius.set_value(float(values.get("indicator-radius", "90")))
+        self.lock_thickness = Gtk.SpinButton.new_with_range(1, 24, 1); self.lock_thickness.set_value(float(values.get("indicator-thickness", "8")))
+        current_wallpaper = ""
+        try:
+            current_wallpaper = (HOME / ".cache/noir-rice/current-wallpaper").read_text().strip()
+        except OSError:
+            pass
+        self.lock_wallpaper = self.entry(lock_state.get("wallpaper") or current_wallpaper, 360)
+        self.lock_blur = Gtk.SpinButton.new_with_range(0, 80, 1); self.lock_blur.set_value(float(lock_state.get("blur", 18)))
+        self.lock_clock = Gtk.CheckButton(label="Show large clock")
+        self.lock_clock.set_active(lock_state.get("clock", True))
+        self.lock_clock_format = self.entry(lock_state.get("clock_format", "%H:%M"), 140)
+        self.lock_clock_size = Gtk.SpinButton.new_with_range(16, 300, 4); self.lock_clock_size.set_value(float(lock_state.get("clock_size", 96)))
+        self.lock_clock_color_widget, self.lock_clock_color = self.color_control(lock_state.get("clock_color", values.get("text-color", "d0d0d0")), True)
+        self.lock_clock_font = self.entry(lock_state.get("clock_font", values.get("font", "JetBrains Mono")), 180)
+        self.lock_clock_position = Gtk.ComboBoxText()
+        for position in ("top", "center", "bottom"):
+            self.lock_clock_position.append(position, position.title())
+        self.lock_clock_position.set_active_id(lock_state.get("clock_position", "top"))
+        self.lock_clock_x = Gtk.SpinButton.new_with_range(-1000, 1000, 4); self.lock_clock_x.set_value(float(lock_state.get("clock_x", 0)))
+        self.lock_clock_y = Gtk.SpinButton.new_with_range(-500, 1000, 4); self.lock_clock_y.set_value(float(lock_state.get("clock_y", 90)))
+        for label, widget in (("Background color", self.lock_background_widget), ("Indicator inside", self.lock_inside_widget),
+                              ("Inside clear", self.lock_inside_clear_widget), ("Inside verifying", self.lock_inside_ver_widget),
+                              ("Inside wrong", self.lock_inside_wrong_widget), ("Indicator ring", self.lock_ring_widget),
+                              ("Ring clear", self.lock_ring_clear_widget), ("Ring verifying", self.lock_ring_ver_widget),
+                              ("Ring wrong", self.lock_ring_wrong_widget), ("Line color", self.lock_line_widget),
+                              ("Key highlight", self.lock_key_hl_widget), ("Backspace highlight", self.lock_bs_hl_widget),
+                              ("Text color", self.lock_text_widget),
+                              ("Font", self.lock_font), ("Font size", self.lock_size),
+                              ("Indicator radius", self.lock_radius), ("Indicator thickness", self.lock_thickness)):
+            card.pack_start(self.waybar_field(label, widget), False, False, 0)
+        card.pack_start(self.waybar_field("Wallpaper source", self.lock_wallpaper), False, False, 0)
+        card.pack_start(self.waybar_field("Wallpaper blur", self.lock_blur), False, False, 0)
+        card.pack_start(self.lock_clock, False, False, 4)
+        card.pack_start(self.waybar_field("Clock format", self.lock_clock_format), False, False, 0)
+        card.pack_start(self.waybar_field("Clock size", self.lock_clock_size), False, False, 0)
+        card.pack_start(self.waybar_field("Clock color", self.lock_clock_color_widget), False, False, 0)
+        card.pack_start(self.waybar_field("Clock font", self.lock_clock_font), False, False, 0)
+        card.pack_start(self.waybar_field("Clock position", self.lock_clock_position), False, False, 0)
+        card.pack_start(self.waybar_field("Clock horizontal offset", self.lock_clock_x), False, False, 0)
+        card.pack_start(self.waybar_field("Clock vertical offset", self.lock_clock_y), False, False, 0)
+        self.lock_failed = Gtk.CheckButton(label="Show failed-attempt count")
+        self.lock_failed.set_active("show-failed-attempts" in values)
+        card.pack_start(self.lock_failed, False, False, 6)
+        for widget in (self.lock_background, self.lock_inside, self.lock_inside_clear, self.lock_inside_ver,
+                       self.lock_inside_wrong, self.lock_ring, self.lock_ring_clear, self.lock_ring_ver,
+                       self.lock_ring_wrong, self.lock_line, self.lock_key_hl, self.lock_bs_hl,
+                       self.lock_text, self.lock_font):
+            widget.connect("changed", lambda *_: self.schedule_live("lockscreen", self.apply_lockscreen, 700))
+            widget.connect("changed", lambda *_: self.lock_preview.queue_draw())
+        for widget in (self.lock_wallpaper, self.lock_clock_format, self.lock_clock_color, self.lock_clock_font):
+            widget.connect("changed", lambda *_: self.schedule_live("lockscreen", self.apply_lockscreen, 700))
+            widget.connect("changed", lambda *_: self.lock_preview.queue_draw())
+        self.lock_clock_position.connect("changed", lambda *_: self.schedule_live("lockscreen", self.apply_lockscreen, 300))
+        self.lock_clock_position.connect("changed", lambda *_: self.lock_preview.queue_draw())
+        for widget in (self.lock_size, self.lock_radius, self.lock_thickness, self.lock_clock_size,
+                       self.lock_clock_x, self.lock_clock_y):
+            widget.connect("value-changed", lambda *_: self.schedule_live("lockscreen", self.apply_lockscreen, 450))
+            widget.connect("value-changed", lambda *_: self.lock_preview.queue_draw())
+        self.lock_blur.connect("value-changed", lambda *_: self.schedule_live("lockscreen", self.apply_lockscreen, 500))
+        self.lock_blur.connect("value-changed", lambda *_: self.lock_preview.queue_draw())
+        self.lock_clock.connect("toggled", lambda *_: self.schedule_live("lockscreen", self.apply_lockscreen, 250))
+        self.lock_clock.connect("toggled", lambda *_: self.lock_preview.queue_draw())
+        self.lock_clock_size.connect("value-changed", lambda *_: self.schedule_live("lockscreen", self.apply_lockscreen, 450))
+        self.lock_clock_size.connect("value-changed", lambda *_: self.lock_preview.queue_draw())
+        self.lock_failed.connect("toggled", lambda *_: self.schedule_live("lockscreen", self.apply_lockscreen, 250))
+        self.lock_failed.connect("toggled", lambda *_: self.lock_preview.queue_draw())
+        apply_button = Gtk.Button(label="Apply lock screen")
+        apply_button.get_style_context().add_class("action"); apply_button.connect("clicked", self.apply_lockscreen)
+        card.pack_start(apply_button, False, False, 5)
+        box.pack_start(card, False, False, 0)
+        preview_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        preview_card.set_margin_start(16); preview_card.set_margin_end(16); preview_card.set_margin_bottom(14)
+        preview_card.get_style_context().add_class("card")
+        preview_title = Gtk.Label(label="LIVE LOCK SCREEN PREVIEW", xalign=0); preview_title.get_style_context().add_class("card-title")
+        preview_copy = Gtk.Label(label="This preview follows the fields above; Lock now applies the same configuration to the session.", xalign=0)
+        preview_copy.set_line_wrap(True); preview_copy.get_style_context().add_class("card-copy")
+        self.lock_preview = Gtk.DrawingArea()
+        self.lock_preview.set_size_request(-1, 300)
+        self.lock_preview.connect("draw", self.draw_lockscreen_preview)
+        preview_card.pack_start(preview_title, False, False, 0)
+        preview_card.pack_start(preview_copy, False, False, 0)
+        preview_card.pack_start(self.lock_preview, False, False, 0)
+        box.pack_start(preview_card, False, False, 0)
+        self.regenerate_lock_preview()
+        box.pack_start(self.card("LOCK ACTION", "Preview the active lock screen configuration by locking the session now.", [
+            ("Lock now", lambda *_: self.launch(self.local("noir-lockscreen"), "Session locked"), True),
+        ]), False, False, 0)
+        return box
+
+    def regenerate_lock_preview(self):
+        try:
+            subprocess.Popen(self.local("noir-lockscreen", "--preview"), start_new_session=True)
+            GLib.timeout_add(1000, lambda: (self.lock_preview.queue_draw() or False))
+        except OSError:
+            self.lock_preview.queue_draw()
+
+    def preview_color(self, field, fallback):
+        raw = field.get_text().strip().lstrip("#")
+        if len(raw) not in (6, 8) or any(char not in "0123456789abcdefABCDEF" for char in raw):
+            raw = fallback
+        values = tuple(int(raw[index:index + 2], 16) / 255 for index in (0, 2, 4))
+        alpha = int(raw[6:8], 16) / 255 if len(raw) == 8 else 1.0
+        return (*values, alpha)
+
+    def draw_lockscreen_preview(self, _area, context):
+        allocation = self.lock_preview.get_allocation()
+        width, height = allocation.width, allocation.height
+        bg = self.preview_color(self.lock_background, "000000")
+        inside = self.preview_color(self.lock_inside, "121215")
+        ring = self.preview_color(self.lock_ring, "cfcfcf")
+        text = self.preview_color(self.lock_text, "d0d0d0")
+        background_image = HOME / ".cache/noir-rice/lockscreen-background.png"
+        if background_image.exists():
+            try:
+                pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(background_image), width, height, True)
+                Gdk.cairo_set_source_pixbuf(context, pixbuf, (width - pixbuf.get_width()) / 2,
+                                            (height - pixbuf.get_height()) / 2)
+                context.paint()
+            except Exception:
+                context.set_source_rgba(*bg); context.paint()
+        else:
+            context.set_source_rgba(*bg); context.paint()
+        center_x, center_y = width / 2, height / 2
+        radius = min(float(self.lock_radius.get_value()), min(width, height) * 0.28)
+        thickness = max(1.0, float(self.lock_thickness.get_value()))
+        context.arc(center_x, center_y, radius, 0, 6.283185307)
+        context.set_source_rgba(*inside); context.fill_preserve()
+        context.set_line_width(thickness)
+        context.set_source_rgba(*ring); context.stroke()
+        clock_color = self.preview_color(self.lock_clock_color, "d0d0d0")
+        context.set_source_rgba(*clock_color)
+        context.set_font_size(max(12.0, min(float(self.lock_clock_size.get_value()), 72.0)))
+        context.select_font_face(self.lock_clock_font.get_text() or "JetBrains Mono")
+        if not background_image.exists() and self.lock_clock.get_active():
+            label = time.strftime(self.lock_clock_format.get_text() or "%H:%M")
+            extents = context.text_extents(label)
+            position = self.lock_clock_position.get_active_id() or "top"
+            y = 42 if position == "top" else (center_y + extents.height / 2 if position == "center" else height - 42)
+            context.move_to(center_x - extents.width / 2, y)
+            context.show_text(label)
+        context.set_source_rgba(*text)
+        context.set_font_size(max(8.0, min(float(self.lock_size.get_value()), 32.0)))
+        context.select_font_face(self.lock_font.get_text() or "JetBrains Mono")
+        label = "Enter password"
+        extents = context.text_extents(label)
+        context.move_to(center_x - extents.width / 2, center_y + extents.height / 2)
+        context.show_text(label)
+        context.set_font_size(12)
+        context.move_to(18, 24)
+        context.show_text("NOIR LOCK SCREEN")
+        if self.lock_failed.get_active():
+            context.move_to(18, height - 18)
+            context.show_text("Failed attempts: 0")
+        return False
+
+    def apply_lockscreen(self, *_):
+        colors = (self.lock_background, self.lock_inside, self.lock_inside_clear, self.lock_inside_ver,
+                  self.lock_inside_wrong, self.lock_ring, self.lock_ring_clear, self.lock_ring_ver,
+                  self.lock_ring_wrong, self.lock_line, self.lock_key_hl, self.lock_bs_hl, self.lock_text)
+        for field in colors:
+            if not re.fullmatch(r"[0-9a-fA-F]{6,8}", field.get_text().strip().lstrip("#")):
+                self.set_status("Lock screen colors must be rrggbb or rrggbbaa")
+                return
+        values = [
+            "# Noir Swaylock configuration", f"color={self.lock_background.get_text().strip().lstrip('#')}",
+            f"inside-color={self.lock_inside.get_text().strip().lstrip('#')}",
+            f"inside-clear-color={self.lock_inside_clear.get_text().strip().lstrip('#')}",
+            f"inside-ver-color={self.lock_inside_ver.get_text().strip().lstrip('#')}",
+            f"inside-wrong-color={self.lock_inside_wrong.get_text().strip().lstrip('#')}",
+            f"ring-color={self.lock_ring.get_text().strip().lstrip('#')}",
+            f"ring-clear-color={self.lock_ring_clear.get_text().strip().lstrip('#')}",
+            f"ring-ver-color={self.lock_ring_ver.get_text().strip().lstrip('#')}",
+            f"ring-wrong-color={self.lock_ring_wrong.get_text().strip().lstrip('#')}",
+            f"line-color={self.lock_line.get_text().strip().lstrip('#')}",
+            f"key-hl-color={self.lock_key_hl.get_text().strip().lstrip('#')}",
+            f"bs-hl-color={self.lock_bs_hl.get_text().strip().lstrip('#')}",
+            f"text-color={self.lock_text.get_text().strip().lstrip('#')}",
+            f"font={self.lock_font.get_text()}", f"font-size={int(self.lock_size.get_value())}",
+            f"indicator-radius={int(self.lock_radius.get_value())}", f"indicator-thickness={int(self.lock_thickness.get_value())}",
+            "show-failed-attempts" if self.lock_failed.get_active() else "",
+        ]
+        try:
+            SWAYLOCK_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            SWAYLOCK_CONFIG.write_text("\n".join(line for line in values if line) + "\n")
+            LOCKSCREEN_STATE.parent.mkdir(parents=True, exist_ok=True)
+            LOCKSCREEN_STATE.write_text(json.dumps({
+                "wallpaper": self.lock_wallpaper.get_text().strip(),
+                "blur": int(self.lock_blur.get_value()),
+                "clock": self.lock_clock.get_active(),
+                "clock_format": self.lock_clock_format.get_text() or "%H:%M",
+                "clock_size": int(self.lock_clock_size.get_value()),
+                "clock_color": self.lock_clock_color.get_text().strip(),
+                "clock_font": self.lock_clock_font.get_text() or "JetBrains Mono",
+                "clock_position": self.lock_clock_position.get_active_id() or "top",
+                "clock_x": int(self.lock_clock_x.get_value()),
+                "clock_y": int(self.lock_clock_y.get_value()),
+            }, indent=2) + "\n")
+            self.regenerate_lock_preview()
+            self.set_status("Lock screen configuration applied")
+        except OSError as error:
+            self.set_status(f"Lock screen error: {error}")
+
+    def niri_page(self):
+        box = self.page_box()
+        try:
+            niri_text = NIRI_CONFIG.read_text()
+        except OSError:
+            niri_text = ""
+        gap_match = re.search(r"\bgaps\s+(\d+)", niri_text)
+        ring_match = re.search(r"focus-ring\s*\{.*?width\s+(\d+)", niri_text, re.S)
+        active_match = re.search(r"focus-ring\s*\{.*?active-color\s+\"(#[0-9a-fA-F]{6})\"", niri_text, re.S)
+        inactive_match = re.search(r"focus-ring\s*\{.*?inactive-color\s+\"(#[0-9a-fA-F]{6})\"", niri_text, re.S)
+        center_match = re.search(r"center-focused-column\s+\"([^\"]+)\"", niri_text)
+        default_width_match = re.search(r"default-column-width\s*\{\s*proportion\s+([0-9.]+)", niri_text, re.S)
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        card.set_margin_top(14); card.set_margin_bottom(14); card.set_margin_start(16); card.set_margin_end(16)
+        card.get_style_context().add_class("card")
+        title = Gtk.Label(label="NIRI LAYOUT CONFIGURATION", xalign=0); title.get_style_context().add_class("card-title")
+        copy = Gtk.Label(label="Layout and focus-ring changes reload live without opening the KDL configuration file.", xalign=0); copy.get_style_context().add_class("card-copy")
+        card.pack_start(title, False, False, 0); card.pack_start(copy, False, False, 0)
+        self.niri_gaps = Gtk.SpinButton.new_with_range(0, 48, 1); self.niri_gaps.set_value(int(gap_match.group(1)) if gap_match else 8)
+        self.niri_ring = Gtk.SpinButton.new_with_range(0, 12, 1); self.niri_ring.set_value(int(ring_match.group(1)) if ring_match else 2)
+        self.niri_active_widget, self.niri_active = self.color_control(active_match.group(1) if active_match else "#cfcfcf")
+        self.niri_inactive_widget, self.niri_inactive = self.color_control(inactive_match.group(1) if inactive_match else "#242424")
+        self.niri_center = Gtk.ComboBoxText()
+        for value in ("never", "always", "on-overflow"):
+            self.niri_center.append(value, value.replace("-", " ").title())
+        self.niri_center.set_active_id(center_match.group(1) if center_match else "never")
+        self.niri_default_width = Gtk.SpinButton.new_with_range(0.1, 1.0, 0.05)
+        self.niri_default_width.set_value(float(default_width_match.group(1)) if default_width_match else 0.5)
+        for label, widget in (("Window gaps", self.niri_gaps), ("Focus ring width", self.niri_ring),
+                              ("Active ring color", self.niri_active_widget), ("Inactive ring color", self.niri_inactive_widget),
+                              ("Center focused column", self.niri_center), ("Default column width", self.niri_default_width)):
+            card.pack_start(self.waybar_field(label, widget), False, False, 0)
+        preview_title = Gtk.Label(label="NIRI LAYOUT PREVIEW", xalign=0); preview_title.get_style_context().add_class("card-title")
+        self.niri_preview = Gtk.DrawingArea(); self.niri_preview.set_size_request(-1, 210)
+        self.niri_preview.connect("draw", self.draw_niri_preview)
+        card.pack_start(preview_title, False, False, 4)
+        card.pack_start(self.niri_preview, False, False, 0)
+        self.niri_gaps.connect("value-changed", lambda *_: self.schedule_live("niri", self.apply_niri, 450))
+        self.niri_ring.connect("value-changed", lambda *_: self.schedule_live("niri", self.apply_niri, 450))
+        self.niri_active.connect("changed", lambda *_: self.schedule_live("niri", self.apply_niri, 700))
+        self.niri_inactive.connect("changed", lambda *_: self.schedule_live("niri", self.apply_niri, 700))
+        self.niri_center.connect("changed", lambda *_: self.schedule_live("niri", self.apply_niri, 350))
+        self.niri_default_width.connect("value-changed", lambda *_: self.schedule_live("niri", self.apply_niri, 450))
+        self.niri_gaps.connect("value-changed", lambda *_: self.niri_preview.queue_draw())
+        self.niri_ring.connect("value-changed", lambda *_: self.niri_preview.queue_draw())
+        self.niri_active.connect("changed", lambda *_: self.niri_preview.queue_draw())
+        self.niri_inactive.connect("changed", lambda *_: self.niri_preview.queue_draw())
+        self.niri_default_width.connect("value-changed", lambda *_: self.niri_preview.queue_draw())
+        button = Gtk.Button(label="Apply Niri layout")
+        button.get_style_context().add_class("action"); button.connect("clicked", self.apply_niri)
+        card.pack_start(button, False, False, 8)
+        box.pack_start(card, False, False, 0)
+        box.pack_start(self.card("WINDOW MANAGER ACTIONS", "Use the existing Noir keyboard-first Niri setup.", [
+            ("Reload Niri config", lambda *_: self.launch(["niri", "msg", "action", "load-config-file"], "Niri configuration reloaded"), True),
+        ]), False, False, 0)
+        return box
+
+    def draw_niri_preview(self, _area, context):
+        allocation = self.niri_preview.get_allocation()
+        width, height = allocation.width, allocation.height
+        context.set_source_rgb(0, 0, 0); context.paint()
+        active = self.preview_color(self.niri_active, "cfcfcf")
+        inactive = self.preview_color(self.niri_inactive, "242424")
+        gaps = float(self.niri_gaps.get_value())
+        ring = max(0, float(self.niri_ring.get_value()))
+        left = 18 + gaps; top = 24 + gaps
+        column_width = (width - 36 - gaps * 4) / 3
+        window_height = height - 48 - gaps * 2
+        for index in range(3):
+            x = left + index * (column_width + gaps)
+            context.set_source_rgb(0.08, 0.08, 0.09)
+            context.rectangle(x, top, column_width, window_height); context.fill()
+            context.set_line_width(ring or 1)
+            context.set_source_rgba(*(active if index == 1 else inactive))
+            context.rectangle(x + ring / 2, top + ring / 2, column_width - ring, window_height - ring); context.stroke()
+        context.set_source_rgba(*active); context.set_font_size(10)
+        context.move_to(24, height - 12); context.show_text(f"gaps {int(gaps)}   focus ring {int(ring)}")
+        return False
+
+    def apply_niri(self, *_):
+        try:
+            text = NIRI_CONFIG.read_text()
+            text = re.sub(r"(\bgaps\s+)\d+", rf"\g<1>{int(self.niri_gaps.get_value())}", text, count=1)
+            text = re.sub(r"(focus-ring\s*\{.*?\bwidth\s+)\d+", rf"\g<1>{int(self.niri_ring.get_value())}", text, count=1, flags=re.S)
+            center = self.niri_center.get_active_id() or "never"
+            text = re.sub(r"(center-focused-column\s+\")[^\"]+(\")", rf"\g<1>{center}\g<2>", text, count=1)
+            text = re.sub(r"(default-column-width\s*\{\s*proportion\s+)[0-9.]+",
+                          rf"\g<1>{self.niri_default_width.get_value():.2f}", text, count=1, flags=re.S)
+            for key, value in (("active-color", self.niri_active.get_text()), ("inactive-color", self.niri_inactive.get_text())):
+                if not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+                    raise ValueError(f"{key} must be a six-digit color")
+                text = re.sub(rf'(focus-ring\s*\{{.*?\b{key}\s+\")[^\"]+(\")', rf'\g<1>{value}\g<2>', text, count=1, flags=re.S)
+            NIRI_CONFIG.write_text(text)
+            self.launch(["niri", "msg", "action", "load-config-file"], "Niri layout applied")
+        except Exception as error:
+            self.set_status(f"Niri error: {error}")
+
+    def presets_page(self):
+        box = self.page_box()
+        box.pack_start(self.card("NOIR PRESETS", "Apply the monochrome defaults and reload the active desktop components.", [
+            ("Apply Noir defaults", lambda *_: self.apply_noir_preset(), True),
+            ("Create backup", lambda *_: self.create_backup(), False),
+            ("Reload all", lambda *_: self.reload_all(), False),
+        ]), False, False, 0)
+        box.pack_start(self.card("SESSION", "Lock or leave the current graphical session.", [
+            ("Lock now", lambda *_: self.launch(self.local("noir-lockscreen"), "Session locked"), True),
+            ("Logout menu", lambda *_: self.launch(["wlogout", "-b", "4", "-c", "16", "-r", "0", "-m", "340", "-s"], "Logout menu opened"), False),
+        ]), False, False, 0)
+        return box
+
+    def diagnostics_page(self):
+        box = self.page_box()
+        box.pack_start(self.card("NOIR HEALTH CHECK", "Check required commands, configuration syntax, and the active session.", [
+            ("Run diagnostics", lambda *_: self.run_diagnostics(), True),
+            ("Create backup", lambda *_: self.create_backup(), False),
+            ("Open backups", lambda *_: self.launch(["kitty", "--directory", str(HOME / ".local/state/noir-rice/backups")], "Backup directory opened"), False),
+        ]), False, False, 0)
+        self.diagnostic_output = Gtk.Label(label="Press Run diagnostics to check the rice.", xalign=0)
+        self.diagnostic_output.set_selectable(True); self.diagnostic_output.set_line_wrap(True)
+        self.diagnostic_output.get_style_context().add_class("status")
+        box.pack_start(self.diagnostic_output, False, False, 16)
+        return box
+
+    def create_backup(self):
+        try:
+            result = subprocess.run(self.local("noir-backup"), capture_output=True, text=True, check=True)
+            self.set_status(result.stdout.strip() or "Manual backup created")
+        except (OSError, subprocess.CalledProcessError) as error:
+            self.set_status(f"Backup error: {error}")
+
+    def run_diagnostics(self):
+        required = ("niri", "waybar", "kitty", "swaylock", "swaybg", "fuzzel", "jq")
+        optional = ("magick", "chafa", "wl-mirror", "nwg-displays", "fc-match")
+        lines = ["NOIR DIAGNOSTICS"]
+        for command in required:
+            lines.append(f"{'OK  ' if shutil.which(command) else 'MISS'} required: {command}")
+        for command in optional:
+            lines.append(f"{'OK  ' if shutil.which(command) else '----'} optional: {command}")
+        checks = (("Waybar JSON", ["jq", "empty", str(WAYBAR / "config.jsonc")]),
+                  ("Niri KDL", ["niri", "validate", "-c", str(NIRI_CONFIG)]),
+                  ("Settings Python", ["python3", "-m", "py_compile", str(BIN / "noir-settings")]))
+        for label, command in checks:
+            try:
+                result = subprocess.run(command, capture_output=True, text=True)
+                lines.append(f"{'OK  ' if result.returncode == 0 else 'FAIL'} {label}")
+            except OSError:
+                lines.append(f"FAIL {label}: command unavailable")
+        lines.append(f"Backups: {HOME / '.local/state/noir-rice/backups'}")
+        self.diagnostic_output.set_text("\n".join(lines))
+        self.set_status("Diagnostics completed")
+
+    def apply_noir_preset(self):
+        self.wb_height.set_value(32); self.wb_spacing.set_value(8); self.wb_font_size.set_value(11)
+        self.wb_clock.set_text("{:%H:%M %a, %b %d}"); self.wb_background.set_text("#000000")
+        self.wb_text.set_text("#f3f3f5"); self.wb_highlight.set_text("#222226"); self.wb_surface.set_text("#18181c")
+        self.wb_opacity.set_value(100); self.wb_blur.set_active(False)
+        self.wb_workspaces.set_active(True); self.wb_weather_toggle.set_active(True)
+        self.wb_notifications.set_active(True); self.wb_tray.set_active(True)
+        self.wb_cpu.set_active(True); self.wb_memory.set_active(True)
+        self.wb_disk.set_active(True)
+        self.niri_gaps.set_value(8); self.niri_ring.set_value(2)
+        self.niri_center.set_active_id("never"); self.niri_default_width.set_value(0.5)
+        self.niri_active.set_text("#cfcfcf"); self.niri_inactive.set_text("#242424")
+        self.apply_waybar(); self.apply_niri()
+
+    def reload_all(self):
+        self.reload_waybar()
+        self.launch(["niri", "msg", "action", "load-config-file"], "Waybar and Niri reloaded")
+
+
+def main():
+    window = NoirSettings()
+    window.connect("destroy", Gtk.main_quit)
+    window.show_all()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()
