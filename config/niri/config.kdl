@@ -8,6 +8,8 @@ input {
         accel-speed 0.2
         accel-profile "flat"
     }
+    // Focus the window under the pointer, like Hyprland's focus-follows-mouse.
+    focus-follows-mouse
     touchpad {
         tap
         natural-scroll

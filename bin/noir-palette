@@ -1,0 +1,297 @@
+#!/usr/bin/python3
+"""Extract a restrained palette from the active wallpaper and apply it to Noir."""
+
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import gi
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import GdkPixbuf
+
+
+HOME = Path.home()
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+CACHE = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "noir-rice"
+STATE = CONFIG / "noir-rice" / "palette.json"
+WAYBAR_CSS = CONFIG / "waybar" / "style.css"
+KITTY = CONFIG / "kitty" / "kitty.conf"
+NVIM = CONFIG / "noir-rice" / "nvim.json"
+DUNST = CONFIG / "dunst" / "dunstrc"
+DEFAULT_COLORS = {
+    "background": "#000000", "surface": "#121215", "accent": "#cfcfcf",
+    "foreground": "#f3f3f5", "muted": "#9999a1", "border": "#29292f",
+    "dominant": "#777780",
+}
+
+
+def read_state():
+    try:
+        return json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        return {"enabled": False, "mode": "accent"}
+
+
+def write_state(state):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    STATE.write_text(json.dumps(state, indent=2) + "\n")
+
+
+def wallpaper_path():
+    try:
+        path = Path((CACHE / "current-wallpaper").read_text().strip()).expanduser()
+        return path if path.is_file() else None
+    except OSError:
+        return None
+
+
+def extract_colors(path, options=None):
+    options = options or {}
+    style = options.get("style", "readable")
+    style_defaults = {
+        "readable": {"darkness": 78, "accent": 70, "contrast": 90, "high_contrast": True},
+        "balanced": {"darkness": 72, "accent": 82, "contrast": 72, "high_contrast": True},
+        "vivid": {"darkness": 64, "accent": 100, "contrast": 82, "high_contrast": True},
+        "muted": {"darkness": 82, "accent": 38, "contrast": 78, "high_contrast": True},
+    }.get(style, {})
+    darkness = max(10, min(92, int(options.get("darkness", style_defaults.get("darkness", 78)))))
+    accent_strength = max(0, min(100, int(options.get("accent_strength", style_defaults.get("accent", 70)))))
+    contrast_boost = max(0, min(100, int(options.get("contrast_boost", style_defaults.get("contrast", 90)))))
+    high_contrast = bool(options.get("high_contrast", style_defaults.get("high_contrast", True)))
+    pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), 72, 72, True)
+    pixels = pixbuf.get_pixels()
+    channels = pixbuf.get_n_channels()
+    stride = pixbuf.get_rowstride()
+    histogram = {}
+    for y in range(pixbuf.get_height()):
+        row = y * stride
+        for x in range(pixbuf.get_width()):
+            offset = row + x * channels
+            red, green, blue = pixels[offset], pixels[offset + 1], pixels[offset + 2]
+            # Quantization keeps noisy photographs from producing a huge palette.
+            key = (red // 24, green // 24, blue // 24)
+            histogram[key] = histogram.get(key, 0) + 1
+    colors = []
+    for (red, green, blue), count in sorted(histogram.items(), key=lambda item: item[1], reverse=True):
+        rgb = tuple(min(255, value * 24 + 12) for value in (red, green, blue))
+        brightness = sum(rgb) / 3
+        saturation = max(rgb) - min(rgb)
+        if not any(sum((rgb[i] - other[i]) ** 2 for i in range(3)) < 1700 for other, _ in colors):
+            colors.append((rgb, count))
+        if len(colors) >= 8:
+            break
+    if not colors:
+        return dict(DEFAULT_COLORS)
+
+    def hex_color(rgb):
+        return "#%02x%02x%02x" % rgb
+
+    dominant = colors[0][0]
+    dark = min(colors, key=lambda item: sum(item[0]))[0]
+    max_count = max(item[1] for item in colors)
+    vivid = max(
+        colors,
+        key=lambda item: ((max(item[0]) - min(item[0])) * (0.45 + item[1] / max_count), item[1]),
+    )[0]
+
+    def mix(first, second, amount):
+        return tuple(round(first[i] * (1 - amount) + second[i] * amount) for i in range(3))
+
+    def luminance(rgb):
+        channels = []
+        for channel in rgb:
+            value = channel / 255
+            channels.append(value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4)
+        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+    def contrast(first, second):
+        light, dark_value = sorted((luminance(first), luminance(second)), reverse=True)
+        return (light + 0.05) / (dark_value + 0.05)
+
+    def readable(color, surface_color, ratio=3.0):
+        if contrast(color, surface_color) >= ratio:
+            return color
+        for amount in (0.12, 0.24, 0.36, 0.48, 0.60, 0.72, 0.84, 1.0):
+            candidate = mix(color, (255, 255, 255), amount)
+            if contrast(candidate, surface_color) >= ratio:
+                return candidate
+        return (255, 255, 255)
+
+    # Keep wallpaper colors usable for text and controls instead of copying
+    # potentially bright photographic pixels directly into every surface.
+    background = tuple(round(channel * (1 - darkness / 100)) for channel in dark)
+    surface = mix(background, dominant, 0.28)
+    gray = tuple(round(sum(vivid) / 3) for _ in vivid)
+    vivid = mix(gray, vivid, accent_strength / 100)
+    minimum_ratio = 4.5 if high_contrast else 3.0
+    target_ratio = minimum_ratio + (contrast_boost / 100) * (7.0 - minimum_ratio)
+    border = readable(mix(background, vivid, 0.38), background, max(2.0, target_ratio * 0.55))
+    muted = readable(mix(background, vivid, 0.68), background, max(3.2, target_ratio * 0.72))
+    vivid = readable(vivid, background, target_ratio)
+    foreground = readable(mix(vivid, (255, 255, 255), 0.62), background, minimum_ratio)
+    dominant = readable(dominant, background, max(2.5, target_ratio * 0.65))
+    return {
+        "background": hex_color(background),
+        "surface": hex_color(surface),
+        "accent": hex_color(vivid),
+        "foreground": hex_color(foreground),
+        "muted": hex_color(muted),
+        "border": hex_color(border),
+        "dominant": hex_color(dominant),
+    }
+
+
+def replace_once(text, pattern, replacement):
+    return re.sub(pattern, replacement, text, count=1, flags=re.S)
+
+
+def apply_waybar(colors, mode):
+    if not WAYBAR_CSS.exists():
+        return
+    css = WAYBAR_CSS.read_text()
+    accent = colors["accent"]
+    background = colors["background"]
+    surface = colors["surface"]
+    foreground = colors["foreground"]
+    muted = colors["muted"]
+    border = colors["border"]
+    if mode in ("background", "full"):
+        css = replace_once(css, r"(window#waybar\s*\{[^}]*?background:\s*)(?:#[0-9a-fA-F]{6}|rgba\([^)]*\))", rf"\g<1>{background}")
+    css = replace_once(css, r"(window#waybar\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}", rf"\g<1>{foreground}")
+    css = replace_once(css, r"(window#waybar\s*\{[^}]*?border:\s*)#[0-9a-fA-F]{6}", rf"\g<1>{border}")
+    replacements = {
+        r"(#workspaces button\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": muted,
+        r"(#workspaces button\.focused[^\{]*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": foreground,
+        r"(#workspaces button\.focused[^\{]*\{[^}]*?background:\s*)#[0-9a-fA-F]{6}": surface,
+        r"(#workspaces button\.focused[^\{]*\{[^}]*?border-color:\s*)#[0-9a-fA-F]{6}": accent,
+        r"(#workspaces button:hover\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": foreground,
+        r"(#workspaces button:hover\s*\{[^}]*?background:\s*)#[0-9a-fA-F]{6}": surface,
+        r"(#clock\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": foreground,
+        r"(#custom-weather\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": accent,
+        r"(#custom-notifications\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": muted,
+        r"(#pulseaudio, #pulseaudio\\#microphone, #network, #battery\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": accent,
+        r"(#cpu, #memory, #disk\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": muted,
+        r"(#custom-power\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": foreground,
+        r"(#custom-settings\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": accent,
+        r"(#custom-settings:hover\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": foreground,
+    }
+    if mode == "full":
+        replacements.update({
+            r"(#custom-layout\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": colors["dominant"],
+            r"(#battery\.warning\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": accent,
+            r"(#battery\.critical\s*\{[^}]*?color:\s*)#[0-9a-fA-F]{6}": foreground,
+        })
+    for pattern, value in replacements.items():
+        css = replace_once(css, pattern, rf"\g<1>{value}")
+    WAYBAR_CSS.write_text(css)
+
+
+def apply_kitty(colors, mode):
+    if not KITTY.exists():
+        return
+    text = KITTY.read_text()
+    if mode in ("background", "full"):
+        text = replace_once(text, r"(?m)^(background\s+)#[0-9a-fA-F]{6}", rf"\g<1>{colors['background']}")
+    text = replace_once(text, r"(?m)^(foreground\s+)#[0-9a-fA-F]{6}", rf"\g<1>{colors['foreground']}")
+    text = replace_once(text, r"(?m)^(selection_background\s+)#[0-9a-fA-F]{6}", rf"\g<1>{colors['accent']}")
+    KITTY.write_text(text)
+
+
+def apply_nvim(colors, mode):
+    state = {}
+    try:
+        state = json.loads(NVIM.read_text())
+    except (OSError, ValueError):
+        pass
+    state.update({"accent": colors["accent"], "comment": colors["muted"]})
+    if mode in ("background", "full"):
+        state["background"] = colors["background"]
+    NVIM.parent.mkdir(parents=True, exist_ok=True)
+    NVIM.write_text(json.dumps(state, indent=2) + "\n")
+
+
+def apply_dunst(colors):
+    if not DUNST.exists():
+        return
+    text = DUNST.read_text()
+    text = replace_once(text, r"(background\s*=\s*)\"#[0-9a-fA-F]{6}\"", rf'\g<1>"{colors["background"]}"')
+    text = replace_once(text, r"(foreground\s*=\s*)\"#[0-9a-fA-F]{6}\"", rf'\g<1>"{colors["foreground"]}"')
+    text = replace_once(text, r"(highlight\s*=\s*)\"#[0-9a-fA-F]{6}\"", rf'\g<1>"{colors["accent"]}"')
+    DUNST.write_text(text)
+
+
+def apply_defaults():
+    """Restore the original Noir palette without touching layout settings."""
+    apply_waybar(DEFAULT_COLORS, "full")
+    apply_kitty(DEFAULT_COLORS, "full")
+    apply_nvim(DEFAULT_COLORS, "full")
+    apply_dunst(DEFAULT_COLORS)
+
+
+def reload_desktop():
+    subprocess.run(["pkill", "-x", "waybar"], stderr=subprocess.DEVNULL)
+    if shutil_which("waybar"):
+        subprocess.Popen(["waybar"], start_new_session=True)
+    if shutil_which("dunstctl"):
+        subprocess.run(["dunstctl", "reload"], stderr=subprocess.DEVNULL)
+    if shutil_which("kitty"):
+        subprocess.run(["kitty", "@", "load-config"], stderr=subprocess.DEVNULL)
+
+
+def shutil_which(command):
+    return any((directory / command).is_file() and os.access(directory / command, os.X_OK)
+               for directory in map(Path, os.environ.get("PATH", "").split(os.pathsep)))
+
+
+def apply_palette():
+    state = read_state()
+    path = wallpaper_path()
+    if not path:
+        raise RuntimeError("No active wallpaper was found")
+    colors = extract_colors(path, state)
+    mode = state.get("mode", "accent")
+    if mode == "accent":
+        # Accent-only mode must not retain a background left by a previous
+        # wallpaper mode, so restore Noir surfaces before applying the accent.
+        apply_defaults()
+    apply_waybar(colors, mode)
+    apply_kitty(colors, mode)
+    apply_nvim(colors, mode)
+    if mode in ("background", "full"):
+        apply_dunst(colors)
+    state.update({"enabled": True, "source": str(path), "colors": colors})
+    write_state(state)
+    reload_desktop()
+    print(f"Wallpaper palette applied ({mode}): {path.name}")
+
+
+def main():
+    command = sys.argv[1] if len(sys.argv) > 1 else "apply"
+    state = read_state()
+    if command == "set-mode":
+        mode = sys.argv[2] if len(sys.argv) > 2 else "accent"
+        if mode not in ("accent", "background", "full"):
+            raise SystemExit("mode must be accent, background, or full")
+        state.update({"enabled": True, "mode": mode})
+        write_state(state)
+        apply_palette()
+    elif command == "disable":
+        apply_defaults()
+        state["enabled"] = False
+        write_state(state)
+        reload_desktop()
+        print("Wallpaper palette disabled")
+    elif command == "apply":
+        apply_palette()
+    elif command == "auto":
+        if state.get("enabled"):
+            apply_palette()
+    else:
+        raise SystemExit("Usage: noir-palette {apply|set-mode accent|background|full|disable|auto}")
+
+
+if __name__ == "__main__":
+    main()

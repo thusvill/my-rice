@@ -27,6 +27,8 @@ NIRI_CONFIG = CONFIG / "niri" / "config.kdl"
 SWAYLOCK_CONFIG = CONFIG / "swaylock" / "config"
 LOCKSCREEN_STATE = CONFIG / "noir-rice" / "lockscreen.json"
 NVIM_STATE = CONFIG / "noir-rice" / "nvim.json"
+PALETTE_STATE = CONFIG / "noir-rice" / "palette.json"
+WALLPAPER_STATE = CONFIG / "noir-rice" / "wallpaper.json"
 BIN = HOME / ".local" / "bin"
 WALLPAPER_DIR = HOME / "Pictures" / "Wallpapers"
 
@@ -48,6 +50,9 @@ button.nav.active { background: #18181c; border-color: #33333a; color: #ffffff; 
 .card { background: #121215; border: 1px solid #222226; border-radius: 10px; }
 .card-title { color: #eeeeee; font-weight: 600; }
 .card-copy { color: #9999a1; font-size: 12px; }
+expander.section-expander { margin-top: 4px; margin-bottom: 4px; }
+expander.section-expander title { color: #eeeeee; font-weight: 600; padding: 4px 8px; }
+expander.section-expander title:hover { color: #ffffff; }
 button.action { background: #eeeeee; color: #000000; border: none; border-radius: 6px; padding: 8px 14px; font-weight: 600; }
 button.action:hover { background: #ffffff; }
 button.secondary { background: #18181c; color: #dddddf; border: 1px solid #33333a; border-radius: 6px; padding: 8px 14px; }
@@ -86,6 +91,7 @@ class NoirSettings(Gtk.Window):
         body.pack_start(content, True, True, 0)
 
         self.add_page("ascii", "ASCII Wallpaper", "Generate monochrome wallpaper art", self.ascii_page())
+        self.add_page("appearance", "Appearance", "Use wallpaper colors across the Noir rice", self.appearance_page())
         self.add_page("waybar", "Status Bar", "Configure the Noir Waybar", self.waybar_page())
         self.add_page("terminal", "Terminal", "Configure the Noir Kitty terminal", self.terminal_page())
         self.add_page("editor", "Editor", "Configure the Noir Neovim theme", self.editor_page())
@@ -133,7 +139,7 @@ class NoirSettings(Gtk.Window):
         self.settings_search.set_margin_start(8); self.settings_search.set_margin_end(8); self.settings_search.set_margin_bottom(8)
         self.settings_search.connect("search-changed", self.filter_pages)
         side.pack_start(self.settings_search, False, False, 0)
-        pages = [("ascii", "▧  ASCII Wallpaper"), ("waybar", "▤  Status Bar"), ("terminal", "Terminal"), ("editor", "Editor"),
+        pages = [("ascii", "▧  ASCII Wallpaper"), ("appearance", "Appearance"), ("waybar", "▤  Status Bar"), ("terminal", "Terminal"), ("editor", "Editor"),
                  ("display", "▦  Displays"), ("lock", "◉  Lock Screen"), ("niri", "▦  Window Manager"),
                  ("presets", "Settings  Presets & Dotfiles"), ("diagnostics", "Diagnostics")]
         self.nav_buttons = {}
@@ -166,6 +172,7 @@ class NoirSettings(Gtk.Window):
         return self.status
 
     def add_page(self, name, title, subtitle, widget):
+        self.make_sections_collapsible(widget)
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         heading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         title_label = Gtk.Label(label=title, xalign=0)
@@ -175,12 +182,59 @@ class NoirSettings(Gtk.Window):
         heading.pack_start(title_label, False, False, 0)
         heading.pack_start(subtitle_label, False, False, 0)
         page.pack_start(heading, False, False, 0)
+
+        # Keep previews visible while the editable sections below scroll.
+        previews = [child for child in widget.get_children()
+                    if child.get_style_context().has_class("preview-card")]
+        if previews:
+            preview_bar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            for preview in previews:
+                widget.remove(preview)
+                preview_bar.pack_start(preview, False, False, 0)
+            page.pack_start(preview_bar, False, False, 0)
+
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroller.set_shadow_type(Gtk.ShadowType.NONE)
         scroller.add(widget)
         page.pack_start(scroller, True, True, 0)
         self.stack.add_named(page, name)
+
+    def make_sections_collapsible(self, page_box):
+        """Turn every top-level card on a settings page into an expander.
+
+        The controls remain exactly the same widgets, so their live-preview
+        callbacks and state are preserved.  Only the presentation container is
+        changed, and all sections start open for a familiar first-run view.
+        """
+        for child in list(page_box.get_children()):
+            if child.get_style_context().has_class("preview-card"):
+                continue
+            if not child.get_style_context().has_class("card"):
+                continue
+
+            title = "Section"
+            title_label = None
+            for nested in child.get_children():
+                if not isinstance(nested, Gtk.Label):
+                    continue
+                if nested.get_style_context().has_class("card-title"):
+                    title = nested.get_text() or title
+                    title_label = nested
+                    break
+
+            page_box.remove(child)
+            expander = Gtk.Expander(label=title)
+            expander.set_expanded(True)
+            expander.set_hexpand(True)
+            expander.set_spacing(4)
+            expander.get_style_context().add_class("section-expander")
+            if title_label is not None:
+                # The expander title replaces the duplicate in-card heading.
+                title_label.set_no_show_all(True)
+                title_label.hide()
+            expander.add(child)
+            page_box.pack_start(expander, False, False, 0)
 
     def show_page(self, name):
         self.stack.set_visible_child_name(name)
@@ -300,6 +354,7 @@ class NoirSettings(Gtk.Window):
 
         gallery = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         gallery.set_margin_start(16); gallery.set_margin_end(16)
+        gallery.get_style_context().add_class("card")
         gallery_title = Gtk.Label(label="AVAILABLE WALLPAPERS", xalign=0); gallery_title.get_style_context().add_class("card-title")
         self.gallery_status = Gtk.Label(label="Loading thumbnails…", xalign=0); self.gallery_status.get_style_context().add_class("muted")
         gallery.pack_start(gallery_title, False, False, 0)
@@ -316,6 +371,7 @@ class NoirSettings(Gtk.Window):
         preview_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         preview_card.set_margin_start(16); preview_card.set_margin_end(16); preview_card.set_margin_bottom(14)
         preview_card.get_style_context().add_class("card")
+        preview_card.get_style_context().add_class("preview-card")
         preview_title = Gtk.Label(label="ASCII PREVIEW", xalign=0); preview_title.get_style_context().add_class("card-title")
         self.ascii_preview = Gtk.TextView(); self.ascii_preview.set_editable(False); self.ascii_preview.set_cursor_visible(False)
         self.ascii_preview.set_monospace(True); self.ascii_preview.set_wrap_mode(Gtk.WrapMode.NONE)
@@ -329,6 +385,206 @@ class NoirSettings(Gtk.Window):
             ("Stop slideshow", lambda *_: self.launch(self.local("noir-wallpaper", "stop-slideshow"), "Wallpaper slideshow stopped"), False),
         ]), False, False, 0)
         return box
+
+    def wallpaper_palette_state(self):
+        try:
+            return json.loads(PALETTE_STATE.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {"enabled": False, "mode": "accent"}
+
+    def wallpaper_automation_state(self):
+        try:
+            return json.loads(WALLPAPER_STATE.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {"random_on_startup": False, "cycle_enabled": False, "interval_seconds": 1800}
+
+    def appearance_page(self):
+        state = self.wallpaper_palette_state()
+        palette_defaults = {
+            "readable": (78, 70, 90, True), "balanced": (72, 82, 72, True),
+            "vivid": (64, 100, 82, True), "muted": (82, 38, 78, True),
+        }.get(state.get("style", "readable"), (78, 70, 90, True))
+        box = self.page_box()
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card.set_margin_top(14); card.set_margin_bottom(14); card.set_margin_start(16); card.set_margin_end(16)
+        card.get_style_context().add_class("card")
+        title = Gtk.Label(label="WALLPAPER COLOR SCHEME", xalign=0); title.get_style_context().add_class("card-title")
+        copy = Gtk.Label(label="Extract colors from the active wallpaper and apply them to the Noir desktop, Waybar, Kitty, Neovim, and notifications.", xalign=0)
+        copy.set_line_wrap(True); copy.get_style_context().add_class("card-copy")
+        card.pack_start(title, False, False, 0); card.pack_start(copy, False, False, 0)
+
+        self.palette_enabled = Gtk.CheckButton(label="Use colors extracted from the active wallpaper")
+        self.palette_enabled.set_active(bool(state.get("enabled", False)))
+        card.pack_start(self.palette_enabled, False, False, 5)
+
+        self.palette_mode = Gtk.ComboBoxText()
+        for mode, label in (
+            ("accent", "Accent only — keep Noir backgrounds"),
+            ("background", "Background and accent"),
+            ("full", "Full wallpaper palette"),
+        ):
+            self.palette_mode.append(mode, label)
+        self.palette_mode.set_active_id(state.get("mode", "accent"))
+        card.pack_start(self.waybar_field("Wallpaper color mode", self.palette_mode), False, False, 0)
+
+        self.palette_style = Gtk.ComboBoxText()
+        for style, label in (
+            ("readable", "Readable — strongest contrast"),
+            ("balanced", "Balanced — color and contrast"),
+            ("vivid", "Vivid — strongest color"),
+            ("muted", "Muted — restrained color"),
+        ):
+            self.palette_style.append(style, label)
+        self.palette_style.set_active_id(state.get("style", "readable"))
+        card.pack_start(self.waybar_field("Palette style", self.palette_style), False, False, 0)
+
+        self.palette_darkness = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 10, 92, 1)
+        self.palette_darkness.set_value(float(state.get("darkness", palette_defaults[0])))
+        self.palette_darkness.set_draw_value(True); self.palette_darkness.set_digits(0)
+        card.pack_start(self.waybar_field("Background darkness", self.palette_darkness), False, False, 0)
+
+        self.palette_strength = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        self.palette_strength.set_value(float(state.get("accent_strength", palette_defaults[1])))
+        self.palette_strength.set_draw_value(True); self.palette_strength.set_digits(0)
+        card.pack_start(self.waybar_field("Accent color intensity", self.palette_strength), False, False, 0)
+
+        self.palette_contrast = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        self.palette_contrast.set_value(float(state.get("contrast_boost", palette_defaults[2])))
+        self.palette_contrast.set_draw_value(True); self.palette_contrast.set_digits(0)
+        card.pack_start(self.waybar_field("Contrast boost", self.palette_contrast), False, False, 0)
+
+        self.palette_high_contrast = Gtk.CheckButton(label="Force high-contrast text and controls")
+        self.palette_high_contrast.set_active(bool(state.get("high_contrast", palette_defaults[3])))
+        card.pack_start(self.palette_high_contrast, False, False, 2)
+
+        apply_button = Gtk.Button(label="Apply wallpaper color scheme")
+        apply_button.get_style_context().add_class("action")
+        apply_button.connect("clicked", self.apply_wallpaper_palette)
+        card.pack_start(apply_button, False, False, 5)
+        box.pack_start(card, False, False, 0)
+
+        automation = self.wallpaper_automation_state()
+        wallpaper_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        wallpaper_card.set_margin_top(0); wallpaper_card.set_margin_bottom(14); wallpaper_card.set_margin_start(16); wallpaper_card.set_margin_end(16)
+        wallpaper_card.get_style_context().add_class("card")
+        wallpaper_title = Gtk.Label(label="WALLPAPER AUTOMATION", xalign=0); wallpaper_title.get_style_context().add_class("card-title")
+        wallpaper_copy = Gtk.Label(label="Choose what happens when the Niri session starts and how often the wallpaper changes.", xalign=0)
+        wallpaper_copy.set_line_wrap(True); wallpaper_copy.get_style_context().add_class("card-copy")
+        wallpaper_card.pack_start(wallpaper_title, False, False, 0); wallpaper_card.pack_start(wallpaper_copy, False, False, 0)
+        self.wallpaper_random_startup = Gtk.CheckButton(label="Use a random wallpaper on startup")
+        self.wallpaper_random_startup.set_active(bool(automation.get("random_on_startup", False)))
+        self.wallpaper_cycle = Gtk.CheckButton(label="Cycle wallpapers automatically")
+        self.wallpaper_cycle.set_active(bool(automation.get("cycle_enabled", False)))
+        self.wallpaper_interval = Gtk.SpinButton.new_with_range(1, 1440, 1)
+        self.wallpaper_interval.set_value(max(1, float(automation.get("interval_seconds", 1800)) / 60))
+        wallpaper_card.pack_start(self.wallpaper_random_startup, False, False, 2)
+        wallpaper_card.pack_start(self.wallpaper_cycle, False, False, 2)
+        wallpaper_card.pack_start(self.waybar_field("Cycle interval (minutes)", self.wallpaper_interval), False, False, 0)
+        wallpaper_apply = Gtk.Button(label="Save wallpaper automation")
+        wallpaper_apply.get_style_context().add_class("action")
+        wallpaper_apply.connect("clicked", self.save_wallpaper_automation)
+        wallpaper_card.pack_start(wallpaper_apply, False, False, 5)
+        box.pack_start(wallpaper_card, False, False, 0)
+        for widget in (self.wallpaper_random_startup, self.wallpaper_cycle):
+            widget.connect("toggled", lambda *_: self.save_wallpaper_automation())
+        self.wallpaper_interval.connect("value-changed", lambda *_: self.save_wallpaper_automation())
+
+        preview = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        preview.set_margin_start(16); preview.set_margin_end(16); preview.set_margin_bottom(14)
+        preview.get_style_context().add_class("card")
+        preview.get_style_context().add_class("preview-card")
+        preview_title = Gtk.Label(label="EXTRACTED PALETTE", xalign=0); preview_title.get_style_context().add_class("card-title")
+        preview_copy = Gtk.Label(label="The palette updates whenever a new wallpaper is applied while this setting is enabled.", xalign=0)
+        preview_copy.set_line_wrap(True); preview_copy.get_style_context().add_class("card-copy")
+        self.palette_preview = Gtk.DrawingArea(); self.palette_preview.set_size_request(-1, 72)
+        self.palette_preview.connect("draw", self.draw_palette_preview)
+        preview.pack_start(preview_title, False, False, 0)
+        preview.pack_start(preview_copy, False, False, 0)
+        preview.pack_start(self.palette_preview, False, False, 0)
+        box.pack_start(preview, False, False, 0)
+
+        self.palette_enabled.connect("toggled", lambda *_: self.apply_wallpaper_palette())
+        self.palette_mode.connect("changed", lambda *_: self.apply_wallpaper_palette() if self.palette_enabled.get_active() else None)
+        self.palette_style.connect("changed", self.palette_style_changed)
+        for widget in (self.palette_darkness, self.palette_strength, self.palette_contrast):
+            widget.connect("value-changed", lambda *_: self.schedule_live("palette", self.apply_wallpaper_palette, 650) if self.palette_enabled.get_active() else None)
+        self.palette_high_contrast.connect("toggled", lambda *_: self.schedule_live("palette", self.apply_wallpaper_palette, 650) if self.palette_enabled.get_active() else None)
+        return box
+
+    def palette_style_changed(self, *_):
+        defaults = {
+            "readable": (78, 70, 90, True), "balanced": (72, 82, 72, True),
+            "vivid": (64, 100, 82, True), "muted": (82, 38, 78, True),
+        }.get(self.palette_style.get_active_id(), (78, 70, 90, True))
+        self.palette_darkness.set_value(defaults[0])
+        self.palette_strength.set_value(defaults[1])
+        self.palette_contrast.set_value(defaults[2])
+        self.palette_high_contrast.set_active(defaults[3])
+        if self.palette_enabled.get_active():
+            self.schedule_live("palette", self.apply_wallpaper_palette, 650)
+
+    def save_wallpaper_automation(self, *_):
+        state = {
+            "random_on_startup": self.wallpaper_random_startup.get_active(),
+            "cycle_enabled": self.wallpaper_cycle.get_active(),
+            "interval_seconds": int(self.wallpaper_interval.get_value() * 60),
+        }
+        try:
+            WALLPAPER_STATE.parent.mkdir(parents=True, exist_ok=True)
+            WALLPAPER_STATE.write_text(json.dumps(state, indent=2) + "\n")
+            if state["cycle_enabled"]:
+                self.launch(self.local("noir-wallpaper", "start-cycle", str(state["interval_seconds"])),
+                            f"Wallpaper cycle enabled: every {int(self.wallpaper_interval.get_value())} minutes")
+            else:
+                self.launch(self.local("noir-wallpaper", "stop-cycle"), "Wallpaper cycle disabled")
+            self.set_status("Wallpaper automation saved; startup choice applies on the next Niri session")
+        except OSError as error:
+            self.set_status(f"Wallpaper automation error: {error}")
+
+    def apply_wallpaper_palette(self, *_):
+        try:
+            if not self.palette_enabled.get_active():
+                self.launch(self.local("noir-palette", "disable"), "Wallpaper color scheme disabled")
+                return
+            state = self.wallpaper_palette_state()
+            state.update({
+                "enabled": True,
+                "mode": self.palette_mode.get_active_id() or "accent",
+                "style": self.palette_style.get_active_id() or "readable",
+                "darkness": int(self.palette_darkness.get_value()),
+                "accent_strength": int(self.palette_strength.get_value()),
+                "contrast_boost": int(self.palette_contrast.get_value()),
+                "high_contrast": self.palette_high_contrast.get_active(),
+            })
+            PALETTE_STATE.parent.mkdir(parents=True, exist_ok=True)
+            PALETTE_STATE.write_text(json.dumps(state, indent=2) + "\n")
+            self.launch(self.local("noir-palette", "apply"),
+                        f"Applying wallpaper palette: {state['style']}")
+            GLib.timeout_add(900, self.refresh_palette_preview)
+        except Exception as error:
+            self.set_status(f"Wallpaper palette error: {error}")
+
+    def refresh_palette_preview(self):
+        self.palette_preview.queue_draw()
+        return False
+
+    def draw_palette_preview(self, _area, context):
+        allocation = self.palette_preview.get_allocation()
+        width, height = allocation.width, allocation.height
+        context.set_source_rgb(0, 0, 0); context.paint()
+        state = self.wallpaper_palette_state()
+        colors = state.get("colors", {})
+        swatches = [colors.get(key, fallback) for key, fallback in (
+            ("background", "#000000"), ("surface", "#121215"), ("accent", "#cfcfcf"),
+            ("foreground", "#f3f3f5"), ("muted", "#9999a1"), ("border", "#29292f"),
+        )]
+        swatch_width = max(1, width / len(swatches))
+        for index, value in enumerate(swatches):
+            red, green, blue, _alpha = self.preview_color(self.entry(value), "000000")
+            context.set_source_rgb(red, green, blue)
+            context.rectangle(index * swatch_width, 0, swatch_width + 1, height)
+            context.fill()
+        return False
 
     def populate_wallpapers(self):
         if not WALLPAPER_DIR.exists():
@@ -502,11 +758,17 @@ class NoirSettings(Gtk.Window):
                               ("Background", self.kitty_background_widget), ("Foreground", self.kitty_foreground_widget),
                               ("Selection background", self.kitty_selection_widget)):
             card.pack_start(self.waybar_field(label, widget), False, False, 0)
-        preview_title = Gtk.Label(label="TERMINAL PREVIEW", xalign=0); preview_title.get_style_context().add_class("card-title")
         self.kitty_preview = Gtk.DrawingArea(); self.kitty_preview.set_size_request(-1, 130)
         self.kitty_preview.connect("draw", self.draw_kitty_preview)
-        card.pack_start(preview_title, False, False, 4); card.pack_start(self.kitty_preview, False, False, 0)
         box.pack_start(card, False, False, 0)
+        preview_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        preview_card.set_margin_start(16); preview_card.set_margin_end(16); preview_card.set_margin_bottom(14)
+        preview_card.get_style_context().add_class("card")
+        preview_card.get_style_context().add_class("preview-card")
+        preview_title = Gtk.Label(label="TERMINAL PREVIEW", xalign=0); preview_title.get_style_context().add_class("card-title")
+        preview_card.pack_start(preview_title, False, False, 0)
+        preview_card.pack_start(self.kitty_preview, False, False, 0)
+        box.pack_start(preview_card, False, False, 0)
         for widget in (self.kitty_font_size, self.kitty_padding):
             widget.connect("value-changed", lambda *_: self.schedule_live("kitty", self.apply_kitty, 450))
             widget.connect("value-changed", lambda *_: self.kitty_preview.queue_draw())
@@ -765,12 +1027,17 @@ class NoirSettings(Gtk.Window):
                               ("Background opacity", self.wb_opacity)):
             theme_card.pack_start(self.waybar_field(label, widget), False, False, 0)
         theme_card.pack_start(self.wb_blur, False, False, 6)
-        preview_title = Gtk.Label(label="WAYBAR PREVIEW", xalign=0); preview_title.get_style_context().add_class("card-title")
         self.waybar_preview = Gtk.DrawingArea(); self.waybar_preview.set_size_request(-1, 86)
         self.waybar_preview.connect("draw", self.draw_waybar_preview)
-        theme_card.pack_start(preview_title, False, False, 4)
-        theme_card.pack_start(self.waybar_preview, False, False, 0)
         box.pack_start(theme_card, False, False, 0)
+        preview_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        preview_card.set_margin_start(16); preview_card.set_margin_end(16); preview_card.set_margin_bottom(14)
+        preview_card.get_style_context().add_class("card")
+        preview_card.get_style_context().add_class("preview-card")
+        preview_title = Gtk.Label(label="WAYBAR PREVIEW", xalign=0); preview_title.get_style_context().add_class("card-title")
+        preview_card.pack_start(preview_title, False, False, 0)
+        preview_card.pack_start(self.waybar_preview, False, False, 0)
+        box.pack_start(preview_card, False, False, 0)
 
         modules = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
         modules.set_margin_start(16); modules.set_margin_end(16)
@@ -1060,6 +1327,7 @@ class NoirSettings(Gtk.Window):
         preview_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         preview_card.set_margin_start(16); preview_card.set_margin_end(16); preview_card.set_margin_bottom(14)
         preview_card.get_style_context().add_class("card")
+        preview_card.get_style_context().add_class("preview-card")
         preview_title = Gtk.Label(label="LIVE LOCK SCREEN PREVIEW", xalign=0); preview_title.get_style_context().add_class("card-title")
         preview_copy = Gtk.Label(label="This preview follows the fields above; Lock now applies the same configuration to the session.", xalign=0)
         preview_copy.set_line_wrap(True); preview_copy.get_style_context().add_class("card-copy")
@@ -1221,11 +1489,15 @@ class NoirSettings(Gtk.Window):
                               ("Active ring color", self.niri_active_widget), ("Inactive ring color", self.niri_inactive_widget),
                               ("Center focused column", self.niri_center), ("Default column width", self.niri_default_width)):
             card.pack_start(self.waybar_field(label, widget), False, False, 0)
-        preview_title = Gtk.Label(label="NIRI LAYOUT PREVIEW", xalign=0); preview_title.get_style_context().add_class("card-title")
         self.niri_preview = Gtk.DrawingArea(); self.niri_preview.set_size_request(-1, 210)
         self.niri_preview.connect("draw", self.draw_niri_preview)
-        card.pack_start(preview_title, False, False, 4)
-        card.pack_start(self.niri_preview, False, False, 0)
+        preview_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        preview_card.set_margin_start(16); preview_card.set_margin_end(16); preview_card.set_margin_bottom(14)
+        preview_card.get_style_context().add_class("card")
+        preview_card.get_style_context().add_class("preview-card")
+        preview_title = Gtk.Label(label="NIRI LAYOUT PREVIEW", xalign=0); preview_title.get_style_context().add_class("card-title")
+        preview_card.pack_start(preview_title, False, False, 0)
+        preview_card.pack_start(self.niri_preview, False, False, 0)
         self.niri_gaps.connect("value-changed", lambda *_: self.schedule_live("niri", self.apply_niri, 450))
         self.niri_ring.connect("value-changed", lambda *_: self.schedule_live("niri", self.apply_niri, 450))
         self.niri_active.connect("changed", lambda *_: self.schedule_live("niri", self.apply_niri, 700))
@@ -1241,6 +1513,7 @@ class NoirSettings(Gtk.Window):
         button.get_style_context().add_class("action"); button.connect("clicked", self.apply_niri)
         card.pack_start(button, False, False, 8)
         box.pack_start(card, False, False, 0)
+        box.pack_start(preview_card, False, False, 0)
         box.pack_start(self.card("WINDOW MANAGER ACTIONS", "Use the existing Noir keyboard-first Niri setup.", [
             ("Reload Niri config", lambda *_: self.launch(["niri", "msg", "action", "load-config-file"], "Niri configuration reloaded"), True),
         ]), False, False, 0)

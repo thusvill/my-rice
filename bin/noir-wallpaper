@@ -7,7 +7,9 @@ cache_dir="${XDG_CACHE_HOME:-${user_home}/.cache}/noir-rice"
 current_file="$cache_dir/current-wallpaper"
 pid_file="$cache_dir/swaybg.pid"
 slideshow_pid_file="$cache_dir/slideshow.pid"
+cycle_pid_file="$cache_dir/cycle.pid"
 favorites_file="$cache_dir/favorites"
+automation_state="${XDG_CONFIG_HOME:-${user_home}/.config}/noir-rice/wallpaper.json"
 mkdir -p "$cache_dir"
 
 notify() {
@@ -27,6 +29,7 @@ set_wallpaper() {
     swaybg -i "$target" -m fill >/dev/null 2>&1 &
     echo "$!" > "$pid_file"
     printf '%s\n' "$target" > "$current_file"
+    command -v noir-palette >/dev/null 2>&1 && noir-palette auto >/dev/null 2>&1 || true
     notify "Wallpaper updated" "$(basename -- "$target")"
 }
 
@@ -53,6 +56,44 @@ slideshow() {
         set_wallpaper "$(random_wallpaper)"
         sleep "$delay"
     done
+}
+
+cycle() {
+    local delay="${1:-1800}"
+    [[ "$delay" =~ ^[0-9]+$ ]] || delay=1800
+    printf '%s\n' "$$" > "$cycle_pid_file"
+    trap 'rm -f "$cycle_pid_file"' EXIT INT TERM
+    while true; do
+        set_wallpaper "$(random_wallpaper)"
+        sleep "$delay"
+    done
+}
+
+start_cycle() {
+    local delay="${1:-1800}"
+    stop_cycle
+    cycle "$delay" >/dev/null 2>&1 &
+    disown || true
+}
+
+stop_cycle() {
+    if [[ -f "$cycle_pid_file" ]]; then
+        kill "$(cat "$cycle_pid_file")" 2>/dev/null || true
+        rm -f "$cycle_pid_file"
+    fi
+}
+
+automation_value() {
+    local key="$1"
+    if [[ -f "$automation_state" ]] && command -v jq >/dev/null 2>&1; then
+        if [[ "$key" == "interval_seconds" ]]; then
+            jq -r ".${key} // 1800" "$automation_state" 2>/dev/null || printf '1800\n'
+        else
+            jq -r ".${key} // false" "$automation_state" 2>/dev/null || printf 'false\n'
+        fi
+    else
+        printf 'false\n'
+    fi
 }
 
 stop_slideshow() {
@@ -100,12 +141,17 @@ select_wallpaper() {
 
 init_wallpaper() {
     local target=''
-    if [[ -f "$current_file" && -f "$(cat "$current_file")" ]]; then
+    if [[ "$(automation_value random_on_startup)" == "true" ]]; then
+        target="$(random_wallpaper)"
+    elif [[ -f "$current_file" && -f "$(cat "$current_file")" ]]; then
         target="$(cat "$current_file")"
     else
         target="$(random_wallpaper)"
     fi
     [[ -n "$target" ]] && set_wallpaper "$target"
+    if [[ "$(automation_value cycle_enabled)" == "true" ]]; then
+        start_cycle "$(automation_value interval_seconds)"
+    fi
 }
 
 case "${1:-select}" in
@@ -114,8 +160,11 @@ case "${1:-select}" in
     favorite) favorite_wallpaper "${2:-}" ;;
     slideshow) slideshow "${2:-300}" ;;
     stop-slideshow) stop_slideshow ;;
+    cycle) cycle "${2:-1800}" ;;
+    start-cycle) start_cycle "${2:-1800}" ;;
+    stop-cycle) stop_cycle ;;
     select) select_wallpaper ;;
     ascii) generate_ascii "${2:-}" ;;
     set) set_wallpaper "$2" ;;
-    *) echo "Usage: noir-wallpaper {init|random|select|ascii [image]|set image}" >&2; exit 2 ;;
+    *) echo "Usage: noir-wallpaper {init|random|select|ascii [image]|set image|start-cycle seconds|stop-cycle}" >&2; exit 2 ;;
 esac
