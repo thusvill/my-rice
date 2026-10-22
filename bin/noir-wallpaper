@@ -5,6 +5,7 @@ user_home="${HOME}"
 wallpaper_dir="${user_home}/Pictures/Wallpapers"
 cache_dir="${XDG_CACHE_HOME:-${user_home}/.cache}/noir-rice"
 current_file="$cache_dir/current-wallpaper"
+source_file="$cache_dir/source-wallpaper"
 pid_file="$cache_dir/swaybg.pid"
 slideshow_pid_file="$cache_dir/slideshow.pid"
 cycle_pid_file="$cache_dir/cycle.pid"
@@ -22,15 +23,18 @@ wallpapers() {
 
 set_wallpaper() {
     local target="$1"
+    local applied
     [[ -f "$target" ]] || return 1
+    applied="$(wallpaper_pipeline "$target")" || return 1
     if [[ -f "$pid_file" ]]; then
         kill "$(cat "$pid_file")" 2>/dev/null || true
     fi
-    swaybg -i "$target" -m fill >/dev/null 2>&1 &
+    swaybg -i "$applied" -m fill >/dev/null 2>&1 &
     echo "$!" > "$pid_file"
-    printf '%s\n' "$target" > "$current_file"
+    printf '%s\n' "$applied" > "$current_file"
+    printf '%s\n' "$target" > "$source_file"
     command -v noir-palette >/dev/null 2>&1 && noir-palette auto >/dev/null 2>&1 || true
-    notify "Wallpaper updated" "$(basename -- "$target")"
+    notify "Wallpaper updated" "$(basename -- "$target")$( [[ "$applied" != "$target" ]] && printf ' (dithered)' )"
 }
 
 random_wallpaper() {
@@ -103,26 +107,46 @@ stop_slideshow() {
     fi
 }
 
-generate_ascii() {
-    local source="${1:-$(random_wallpaper)}"
-    local output="$cache_dir/ascii-wallpaper.png"
-    local text_file="$cache_dir/ascii-wallpaper.txt"
+wallpaper_setting() {
+    local key="$1"
+    local fallback="$2"
+    if [[ -f "$automation_state" ]] && command -v jq >/dev/null 2>&1; then
+        jq -r --arg fallback "$fallback" ".${key} // \$fallback" "$automation_state" 2>/dev/null || printf '%s\n' "$fallback"
+    else
+        printf '%s\n' "$fallback"
+    fi
+}
+
+wallpaper_pipeline() {
+    local source="$1"
+    if [[ "$(wallpaper_setting dither_enabled false)" != "true" ]]; then
+        printf '%s\n' "$source"
+        return 0
+    fi
+    local output="$cache_dir/dithered-wallpaper.png"
     local converter=()
-    local ascii_size="${NOIR_ASCII_SIZE:-180x90}"
-    command -v chafa >/dev/null 2>&1 || { notify "ASCII wallpaper unavailable" "Install chafa"; return 1; }
+    local colors method pattern
+    [[ -f "$source" ]] || return 1
     if command -v magick >/dev/null 2>&1; then
         converter=(magick)
     elif command -v convert >/dev/null 2>&1; then
         converter=(convert)
     else
-        notify "ASCII wallpaper unavailable" "Install ImageMagick"; return 1
+        notify "Dithered wallpaper unavailable" "Install ImageMagick"
+        return 1
     fi
-    [[ -f "$source" ]] || { notify "ASCII wallpaper unavailable" "No wallpaper image was selected"; return 1; }
-    chafa --format symbols --colors 2 --size "$ascii_size" "$source" \
-        | sed $'s/\033\\[[0-9;?]*[ -\/]*[@-~]//g' > "$text_file"
-    "${converter[@]}" -background black -fill white -font DejaVu-Sans-Mono -pointsize 10 \
-        -size 1920x1080 caption:"@$text_file" "$output"
-    set_wallpaper "$output"
+    colors="$(wallpaper_setting dither_colors 16)"
+    method="$(wallpaper_setting dither_method FloydSteinberg)"
+    pattern="$(wallpaper_setting dither_pattern o8x8)"
+    if ! [[ "$colors" =~ ^[0-9]+$ ]] || (( colors < 2 || colors > 256 )); then
+        colors=16
+    fi
+    case "$method" in
+        Ordered) "${converter[@]}" "$source" -colors "$colors" -ordered-dither "$pattern" "$output" ;;
+        None) "${converter[@]}" "$source" -colors "$colors" -dither None "$output" ;;
+        *) "${converter[@]}" "$source" -colors "$colors" -dither "$method" "$output" ;;
+    esac
+    printf '%s\n' "$output"
 }
 
 select_wallpaper() {
@@ -143,6 +167,8 @@ init_wallpaper() {
     local target=''
     if [[ "$(automation_value random_on_startup)" == "true" ]]; then
         target="$(random_wallpaper)"
+    elif [[ -f "$source_file" && -f "$(cat "$source_file")" ]]; then
+        target="$(cat "$source_file")"
     elif [[ -f "$current_file" && -f "$(cat "$current_file")" ]]; then
         target="$(cat "$current_file")"
     else
@@ -164,7 +190,6 @@ case "${1:-select}" in
     start-cycle) start_cycle "${2:-1800}" ;;
     stop-cycle) stop_cycle ;;
     select) select_wallpaper ;;
-    ascii) generate_ascii "${2:-}" ;;
     set) set_wallpaper "$2" ;;
-    *) echo "Usage: noir-wallpaper {init|random|select|ascii [image]|set image|start-cycle seconds|stop-cycle}" >&2; exit 2 ;;
+    *) echo "Usage: noir-wallpaper {init|random|select|set image|start-cycle seconds|stop-cycle}" >&2; exit 2 ;;
 esac

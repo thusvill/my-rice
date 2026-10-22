@@ -91,7 +91,7 @@ class NoirSettings(Gtk.Window):
         content.pack_start(self.stack, True, True, 0)
         body.pack_start(content, True, True, 0)
 
-        self.add_page("ascii", "ASCII Wallpaper", "Generate monochrome wallpaper art", self.ascii_page())
+        self.add_page("wallpaper", "Wallpaper", "Choose, dither, and preview your desktop wallpaper", self.wallpaper_page())
         self.add_page("appearance", "Appearance", "Use wallpaper colors across the Noir rice", self.appearance_page())
         self.add_page("launcher", "Launcher", "Calculator and currency conversion", self.launcher_page())
         self.add_page("waybar", "Status Bar", "Configure the Noir Waybar", self.waybar_page())
@@ -102,7 +102,7 @@ class NoirSettings(Gtk.Window):
         self.add_page("niri", "Window Manager", "Niri layout and keybinding configuration", self.niri_page())
         self.add_page("presets", "Presets & Dotfiles", "Open, inspect, and reload rice configuration", self.presets_page())
         self.add_page("diagnostics", "Diagnostics", "Validate dependencies and active configuration", self.diagnostics_page())
-        self.show_page("ascii")
+        self.show_page("wallpaper")
 
     def load_css(self):
         provider = Gtk.CssProvider()
@@ -141,7 +141,7 @@ class NoirSettings(Gtk.Window):
         self.settings_search.set_margin_start(8); self.settings_search.set_margin_end(8); self.settings_search.set_margin_bottom(8)
         self.settings_search.connect("search-changed", self.filter_pages)
         side.pack_start(self.settings_search, False, False, 0)
-        pages = [("ascii", "▧  ASCII Wallpaper"), ("appearance", "Appearance"), ("launcher", "Launcher"), ("waybar", "▤  Status Bar"), ("terminal", "Terminal"), ("editor", "Editor"),
+        pages = [("wallpaper", "▧  Wallpaper"), ("appearance", "Appearance"), ("launcher", "Launcher"), ("waybar", "▤  Status Bar"), ("terminal", "Terminal"), ("editor", "Editor"),
                  ("display", "▦  Displays"), ("lock", "◉  Lock Screen"), ("niri", "▦  Window Manager"),
                  ("presets", "Settings  Presets & Dotfiles"), ("diagnostics", "Diagnostics")]
         self.nav_buttons = {}
@@ -293,15 +293,15 @@ class NoirSettings(Gtk.Window):
         callback()
         return False
 
-    def ascii_page(self):
+    def wallpaper_page(self):
         box = self.page_box()
         source_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.ascii_source = Gtk.FileChooserButton(title="Choose source image", action=Gtk.FileChooserAction.OPEN)
+        self.wallpaper_source = Gtk.FileChooserButton(title="Choose source image", action=Gtk.FileChooserAction.OPEN)
         image_filter = Gtk.FileFilter(); image_filter.set_name("Images")
         for pattern in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
             image_filter.add_pattern(pattern)
-        self.ascii_source.add_filter(image_filter)
-        source_row.pack_start(self.ascii_source, True, True, 0)
+        self.wallpaper_source.add_filter(image_filter)
+        source_row.pack_start(self.wallpaper_source, True, True, 0)
         select_button = Gtk.Button(label="Wallpaper selector")
         select_button.get_style_context().add_class("secondary")
         select_button.connect("clicked", lambda *_: self.launch(self.local("noir-wallpaper", "select"), "Wallpaper selector opened"))
@@ -329,27 +329,42 @@ class NoirSettings(Gtk.Window):
         self.wallpaper_adjustment.connect("value-changed", self.queue_visible_wallpapers)
         self.wallpaper_adjustment.connect("changed", self.queue_visible_wallpapers)
 
-        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
-        self.ascii_width = Gtk.SpinButton.new_with_range(40, 260, 10); self.ascii_width.set_value(180)
-        self.ascii_height = Gtk.SpinButton.new_with_range(20, 140, 10); self.ascii_height.set_value(90)
-        controls.pack_start(self.waybar_field("Characters wide", self.ascii_width), True, True, 0)
-        controls.pack_start(self.waybar_field("Characters high", self.ascii_height), True, True, 0)
+        controls = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.dither_enabled = Gtk.CheckButton(label="Apply ImageMagick dithering when wallpaper is applied")
+        dither_state = self.wallpaper_automation_state()
+        self.dither_enabled.set_active(bool(dither_state.get("dither_enabled", False)))
+        controls.pack_start(self.dither_enabled, False, False, 0)
+        dither_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        self.dither_colors = Gtk.SpinButton.new_with_range(2, 256, 1)
+        self.dither_colors.set_value(float(dither_state.get("dither_colors", 16)))
+        self.dither_method = Gtk.ComboBoxText()
+        for method, label in (("FloydSteinberg", "Floyd–Steinberg"), ("Riemersma", "Riemersma"), ("Ordered", "Ordered"), ("None", "Color reduction only")):
+            self.dither_method.append(method, label)
+        self.dither_method.set_active_id(dither_state.get("dither_method", "FloydSteinberg"))
+        self.dither_pattern = Gtk.ComboBoxText()
+        for pattern in ("o4x4", "o8x8", "h4x4a", "h6x6a"):
+            self.dither_pattern.append(pattern, pattern)
+        self.dither_pattern.set_active_id(dither_state.get("dither_pattern", "o8x8"))
+        dither_row.pack_start(self.waybar_field("Color levels", self.dither_colors), True, True, 0)
+        dither_row.pack_start(self.waybar_field("Method", self.dither_method), True, True, 0)
+        dither_row.pack_start(self.waybar_field("Ordered pattern", self.dither_pattern), True, True, 0)
+        controls.pack_start(dither_row, False, False, 0)
 
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        convert = Gtk.Button(label="Convert selected image")
-        convert.get_style_context().add_class("action"); convert.connect("clicked", self.convert_ascii)
-        random_button = Gtk.Button(label="Random ASCII wallpaper")
-        random_button.get_style_context().add_class("secondary"); random_button.connect("clicked", self.random_ascii)
+        convert = Gtk.Button(label="Apply selected wallpaper")
+        convert.get_style_context().add_class("action"); convert.connect("clicked", self.apply_selected_wallpaper)
+        random_button = Gtk.Button(label="Random wallpaper")
+        random_button.get_style_context().add_class("secondary"); random_button.connect("clicked", self.random_wallpaper)
         favorite = Gtk.Button(label="Favorite selected")
         favorite.get_style_context().add_class("secondary")
-        favorite.connect("clicked", lambda *_: self.launch(self.local("noir-wallpaper", "favorite", self.ascii_source.get_filename() or ""), "Wallpaper favorite saved"))
+        favorite.connect("clicked", lambda *_: self.launch(self.local("noir-wallpaper", "favorite", self.wallpaper_source.get_filename() or ""), "Wallpaper favorite saved"))
         buttons.pack_start(convert, False, False, 0); buttons.pack_start(random_button, False, False, 0); buttons.pack_start(favorite, False, False, 0)
 
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         card.set_margin_top(14); card.set_margin_bottom(14); card.set_margin_start(16); card.set_margin_end(16)
         card.get_style_context().add_class("card")
-        title = Gtk.Label(label="ASCII WALLPAPER GENERATOR", xalign=0); title.get_style_context().add_class("card-title")
-        copy = Gtk.Label(label="Click a thumbnail to select it. Apply the original image or convert it into an ASCII wallpaper.", xalign=0); copy.get_style_context().add_class("card-copy")
+        title = Gtk.Label(label="WALLPAPER PROCESSING", xalign=0); title.get_style_context().add_class("card-title")
+        copy = Gtk.Label(label="Click a thumbnail to preview it. The original image stays untouched; enabling dithering creates a cached ImageMagick copy for the active wallpaper.", xalign=0); copy.get_style_context().add_class("card-copy")
         card.pack_start(title, False, False, 0); card.pack_start(copy, False, False, 0)
         card.pack_start(source_row, False, False, 0); card.pack_start(controls, False, False, 0); card.pack_start(buttons, False, False, 0)
         box.pack_start(card, False, False, 0)
@@ -366,26 +381,26 @@ class NoirSettings(Gtk.Window):
         box.pack_start(gallery, False, False, 0)
         self.populate_wallpapers()
 
-        self.ascii_source.connect("file-set", lambda *_: self.schedule_live("ascii", self.convert_ascii))
-        self.ascii_width.connect("value-changed", lambda *_: self.schedule_live("ascii", self.convert_ascii))
-        self.ascii_height.connect("value-changed", lambda *_: self.schedule_live("ascii", self.convert_ascii))
+        self.wallpaper_source.connect("file-set", lambda *_: self.refresh_wallpaper_preview())
+        self.dither_enabled.connect("toggled", self.save_wallpaper_dither)
+        for widget in (self.dither_colors, self.dither_method, self.dither_pattern):
+            signal = "value-changed" if isinstance(widget, Gtk.SpinButton) else "changed"
+            widget.connect(signal, self.save_wallpaper_dither)
 
         preview_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         preview_card.set_margin_start(16); preview_card.set_margin_end(16); preview_card.set_margin_bottom(14)
         preview_card.get_style_context().add_class("card")
         preview_card.get_style_context().add_class("preview-card")
-        preview_title = Gtk.Label(label="ASCII PREVIEW", xalign=0); preview_title.get_style_context().add_class("card-title")
-        self.ascii_preview = Gtk.TextView(); self.ascii_preview.set_editable(False); self.ascii_preview.set_cursor_visible(False)
-        self.ascii_preview.set_monospace(True); self.ascii_preview.set_wrap_mode(Gtk.WrapMode.NONE)
-        self.ascii_preview.set_size_request(-1, 190)
-        scroll = Gtk.ScrolledWindow(); scroll.set_vexpand(True); scroll.add(self.ascii_preview)
-        preview_card.pack_start(preview_title, False, False, 0); preview_card.pack_start(scroll, True, True, 0)
+        preview_title = Gtk.Label(label="LIVE WALLPAPER PREVIEW", xalign=0); preview_title.get_style_context().add_class("card-title")
+        self.wallpaper_preview = Gtk.Image(); self.wallpaper_preview.set_size_request(-1, 230)
+        preview_card.pack_start(preview_title, False, False, 0); preview_card.pack_start(self.wallpaper_preview, True, True, 0)
         box.pack_start(preview_card, True, True, 0)
         box.pack_start(self.card("WALLPAPER DIRECTORY", "Noir looks for images in ~/Pictures/Wallpapers.", [
             ("Open folder", lambda *_: self.launch(["kitty", "--directory", str(HOME / "Pictures" / "Wallpapers")], "Wallpaper folder opened"), True),
             ("Start slideshow", lambda *_: self.launch(self.local("noir-wallpaper", "slideshow", "300"), "Wallpaper slideshow started"), False),
             ("Stop slideshow", lambda *_: self.launch(self.local("noir-wallpaper", "stop-slideshow"), "Wallpaper slideshow stopped"), False),
         ]), False, False, 0)
+        self.refresh_wallpaper_preview()
         return box
 
     def wallpaper_palette_state(self):
@@ -398,7 +413,9 @@ class NoirSettings(Gtk.Window):
         try:
             return json.loads(WALLPAPER_STATE.read_text())
         except (OSError, json.JSONDecodeError):
-            return {"random_on_startup": False, "cycle_enabled": False, "interval_seconds": 1800}
+            return {"random_on_startup": False, "cycle_enabled": False, "interval_seconds": 1800,
+                    "dither_enabled": False, "dither_colors": 16, "dither_method": "FloydSteinberg",
+                    "dither_pattern": "o8x8"}
 
     def appearance_page(self):
         state = self.wallpaper_palette_state()
@@ -525,21 +542,29 @@ class NoirSettings(Gtk.Window):
         if self.palette_enabled.get_active():
             self.schedule_live("palette", self.apply_wallpaper_palette, 650)
 
-    def save_wallpaper_automation(self, *_):
+    def save_wallpaper_dither(self, *_):
+        self.save_wallpaper_automation(manage_cycle=False)
+
+    def save_wallpaper_automation(self, *_, manage_cycle=True):
         state = {
             "random_on_startup": self.wallpaper_random_startup.get_active(),
             "cycle_enabled": self.wallpaper_cycle.get_active(),
             "interval_seconds": int(self.wallpaper_interval.get_value() * 60),
+            "dither_enabled": self.dither_enabled.get_active() if hasattr(self, "dither_enabled") else False,
+            "dither_colors": int(self.dither_colors.get_value()) if hasattr(self, "dither_colors") else 16,
+            "dither_method": self.dither_method.get_active_id() if hasattr(self, "dither_method") else "FloydSteinberg",
+            "dither_pattern": self.dither_pattern.get_active_id() if hasattr(self, "dither_pattern") else "o8x8",
         }
         try:
             WALLPAPER_STATE.parent.mkdir(parents=True, exist_ok=True)
             WALLPAPER_STATE.write_text(json.dumps(state, indent=2) + "\n")
-            if state["cycle_enabled"]:
-                self.launch(self.local("noir-wallpaper", "start-cycle", str(state["interval_seconds"])),
-                            f"Wallpaper cycle enabled: every {int(self.wallpaper_interval.get_value())} minutes")
-            else:
-                self.launch(self.local("noir-wallpaper", "stop-cycle"), "Wallpaper cycle disabled")
-            self.set_status("Wallpaper automation saved; startup choice applies on the next Niri session")
+            if manage_cycle:
+                if state["cycle_enabled"]:
+                    self.launch(self.local("noir-wallpaper", "start-cycle", str(state["interval_seconds"])),
+                                f"Wallpaper cycle enabled: every {int(self.wallpaper_interval.get_value())} minutes")
+                else:
+                    self.launch(self.local("noir-wallpaper", "stop-cycle"), "Wallpaper cycle disabled")
+            self.set_status("Wallpaper settings saved automatically")
         except OSError as error:
             self.set_status(f"Wallpaper automation error: {error}")
 
@@ -816,39 +841,40 @@ class NoirSettings(Gtk.Window):
         self.rebuild_wallpaper_grid()
 
     def choose_wallpaper(self, _button, path):
-        self.ascii_source.set_filename(path)
+        self.wallpaper_source.set_filename(path)
+        self.refresh_wallpaper_preview()
         self.set_status(f"Selected wallpaper: {Path(path).name}")
 
     def apply_selected_wallpaper(self, *_):
-        source = self.ascii_source.get_filename()
+        source = self.wallpaper_source.get_filename()
         if not source:
             self.set_status("Select a wallpaper thumbnail first")
             return
         self.launch(self.local("noir-wallpaper", "set", source),
                     f"Applied wallpaper: {Path(source).name}")
 
-    def convert_ascii(self, *_):
-        source = self.ascii_source.get_filename()
-        size = f"{int(self.ascii_width.get_value())}x{int(self.ascii_height.get_value())}"
-        command = self.local("noir-wallpaper", "ascii")
-        if source: command.append(source)
-        env = os.environ.copy(); env["NOIR_ASCII_SIZE"] = size
-        self.launch(command, "Rendering ASCII wallpaper", env=env)
-        GLib.timeout_add(1200, self.refresh_ascii_preview)
+    def random_wallpaper(self, *_):
+        if getattr(self, "all_wallpaper_paths", []):
+            import random
+            self.wallpaper_source.set_filename(str(random.choice(self.all_wallpaper_paths)))
+            self.refresh_wallpaper_preview()
 
-    def random_ascii(self, *_):
-        self.ascii_source.unselect_all()
-        self.convert_ascii()
-
-    def refresh_ascii_preview(self):
-        preview = HOME / ".cache" / "noir-rice" / "ascii-wallpaper.txt"
-        try:
-            text = preview.read_text()
-            self.ascii_preview.get_buffer().set_text(text)
-            self.set_status("ASCII preview updated")
-        except OSError:
-            self.set_status("ASCII conversion is still running or failed")
-        return False
+    def refresh_wallpaper_preview(self):
+        source = self.wallpaper_source.get_filename()
+        if not source:
+            current = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "noir-rice/current-wallpaper"
+            try:
+                source = current.read_text().strip()
+            except OSError:
+                source = ""
+        if source and Path(source).exists():
+            try:
+                pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(source, 900, 250, True)
+                self.wallpaper_preview.set_from_pixbuf(pixbuf)
+                return
+            except Exception:
+                pass
+        self.wallpaper_preview.clear()
 
     def waybar_field(self, label, widget):
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
@@ -1732,7 +1758,7 @@ class NoirSettings(Gtk.Window):
 
     def run_diagnostics(self):
         required = ("niri", "waybar", "kitty", "swaylock", "swaybg", "fuzzel", "jq")
-        optional = ("magick", "chafa", "wl-mirror", "nwg-displays", "fc-match")
+        optional = ("magick", "wl-mirror", "nwg-displays", "fc-match")
         lines = ["NOIR DIAGNOSTICS"]
         for command in required:
             lines.append(f"{'OK  ' if shutil.which(command) else 'MISS'} required: {command}")

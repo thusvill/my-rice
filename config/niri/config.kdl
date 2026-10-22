@@ -63,6 +63,18 @@ window-rule {
     }
 }
 
+window-rule {
+    match title="^Noir Screen Capture$"
+    open-floating true
+    open-focused true
+    border {
+        off
+    }
+    focus-ring {
+        off
+    }
+}
+
 spawn-at-startup "sh" "-c" "$HOME/.local/bin/noir-wallpaper init"
 spawn-at-startup "sh" "-c" "$HOME/.local/bin/noir-display-profile"
 spawn-at-startup "waybar"
@@ -119,7 +131,7 @@ binds {
     Mod+Shift+BracketLeft { move-column-to-workspace-down; }
     Mod+Shift+BracketRight { move-column-to-workspace-up; }
 
-    Print { spawn "sh" "-c" "mkdir -p ~/Pictures/Screenshots; grim ~/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png"; }
+    Print { spawn "sh" "-c" "exec \"$HOME/.local/bin/noir-screenshot\""; }
     Mod+Shift+S { spawn "sh" "-c" "mkdir -p ~/Pictures/Screenshots; if command -v slurp >/dev/null; then grim -g \"$(slurp)\" ~/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png; else grim ~/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png; fi"; }
 
     XF86AudioRaiseVolume { spawn "wpctl" "set-volume" "-l" "1" "@DEFAULT_AUDIO_SINK@" "5%+"; }

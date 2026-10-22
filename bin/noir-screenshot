@@ -1,0 +1,174 @@
+#!/usr/bin/python3
+"""GNOME-style screenshot chooser for the Noir Niri rice."""
+
+import os
+import json
+import subprocess
+from datetime import datetime
+from pathlib import Path
+
+if os.environ.get("WAYLAND_DISPLAY"):
+    os.environ["GDK_BACKEND"] = "wayland"
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+
+
+SCREENSHOT_DIR = Path.home() / "Pictures" / "Screenshots"
+CSS = """
+window { background: transparent; }
+.capture-shell { background: #09090b; border: 1px solid #39393f; border-radius: 8px; }
+.capture-title { color: #f3f3f5; font-size: 16px; font-weight: 700; }
+.capture-subtitle { color: #9999a1; font-size: 11px; }
+button { background: #18181c; color: #f3f3f5; border: 1px solid #303038; border-radius: 5px; padding: 12px 18px; }
+button:hover, button:focus { background: #29292f; border-color: #cfcfcf; }
+"""
+
+
+def notify(title, body):
+    if shutil_which("notify-send"):
+        subprocess.Popen(["notify-send", "-a", "Noir Screen Capture", title, body], start_new_session=True)
+
+
+def shutil_which(command):
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        path = Path(directory or ".") / command
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
+def focused_window_geometry():
+    """Return grim geometry for the focused Niri window before the chooser opens."""
+    try:
+        result = subprocess.run(
+            ["niri", "msg", "-j", "focused-window"],
+            capture_output=True, text=True, check=False,
+        )
+        window = json.loads(result.stdout)
+        layout = window.get("layout", {})
+        position = layout.get("tile_pos_in_workspace_view")
+        offset = layout.get("window_offset_in_tile", [0, 0])
+        size = layout.get("window_size")
+        if len(position) == len(offset) == 2 and len(size) == 2:
+            x = int(position[0] + offset[0])
+            y = int(position[1] + offset[1])
+            width, height = int(size[0]), int(size[1])
+            if width > 0 and height > 0:
+                return f"{x},{y} {width}x{height}"
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def capture(mode, window_geometry=None):
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    filename = SCREENSHOT_DIR / f"screenshot-{datetime.now():%Y%m%d-%H%M%S}.png"
+    if mode == "window":
+        if not window_geometry:
+            notify("Window screenshot unavailable", "Niri did not provide the focused window geometry.")
+            return
+        command = ["grim", "-g", window_geometry, str(filename)]
+    elif mode == "area":
+        if not shutil_which("slurp"):
+            notify("Screenshot unavailable", "Install slurp to select an area.")
+            return
+        geometry = subprocess.run(["slurp"], text=True, capture_output=True).stdout.strip()
+        if not geometry:
+            return
+        command = ["grim", "-g", geometry, str(filename)]
+    else:
+        command = ["grim", str(filename)]
+
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        notify("Screenshot failed", result.stderr.strip() or "grim could not capture the screen.")
+        return
+    copied = bool(shutil_which("wl-copy"))
+    if copied:
+        with filename.open("rb") as image:
+            subprocess.run(["wl-copy", "--type", "image/png"], stdin=image, check=False)
+    detail = "\nCopied to clipboard" if copied else ""
+    notify("Screenshot saved", f"{filename}{detail}")
+
+
+class CaptureWindow(Gtk.Window):
+    def __init__(self, window_geometry):
+        super().__init__(title="Noir Screen Capture")
+        self.window_geometry = window_geometry
+        self.set_default_size(600, 150)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_modal(True)
+        self.set_keep_above(True)
+        self.connect("key-press-event", self.on_key_press)
+
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS.encode())
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        shell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        shell.set_margin_top(22); shell.set_margin_bottom(18)
+        shell.set_margin_start(22); shell.set_margin_end(22)
+        shell.get_style_context().add_class("capture-shell")
+        self.add(shell)
+
+        title = Gtk.Label(label="Screen capture", xalign=0)
+        title.get_style_context().add_class("capture-title")
+        shell.pack_start(title, False, False, 0)
+        subtitle = Gtk.Label(label="Choose what to capture", xalign=0)
+        subtitle.get_style_context().add_class("capture-subtitle")
+        shell.pack_start(subtitle, False, False, 0)
+
+        buttons = Gtk.Box(spacing=8)
+        buttons.set_margin_top(14)
+        shell.pack_start(buttons, False, False, 0)
+        screen = Gtk.Button(label="Entire screen\n      1")
+        area = Gtk.Button(label="Select area\n      2")
+        window = Gtk.Button(label="Focused window\n      3")
+        screen.connect("clicked", self.choose, "screen")
+        area.connect("clicked", self.choose, "area")
+        window.connect("clicked", self.choose, "window")
+        buttons.pack_start(screen, True, True, 0)
+        buttons.pack_start(area, True, True, 0)
+        buttons.pack_start(window, True, True, 0)
+
+    def on_key_press(self, _window, event):
+        if event.keyval in (Gdk.KEY_Escape, Gdk.KEY_q):
+            self.destroy()
+            Gtk.main_quit()
+            return True
+        if event.keyval in (Gdk.KEY_1, Gdk.KEY_KP_1):
+            self.choose(None, "screen")
+            return True
+        if event.keyval in (Gdk.KEY_2, Gdk.KEY_KP_2):
+            self.choose(None, "area")
+            return True
+        if event.keyval in (Gdk.KEY_3, Gdk.KEY_KP_3):
+            self.choose(None, "window")
+            return True
+        return False
+
+    def choose(self, _button, mode):
+        self.destroy()
+        # Let the chooser disappear before slurp/grim starts.
+        def run_capture():
+            capture(mode, self.window_geometry)
+            Gtk.main_quit()
+            return False
+        GLib.timeout_add(120, run_capture)
+
+
+def main():
+    if not shutil_which("grim"):
+        notify("Screenshot unavailable", "Install grim to capture the screen.")
+        return
+    window = CaptureWindow(focused_window_geometry())
+    window.show_all()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

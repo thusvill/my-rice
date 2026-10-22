@@ -29,7 +29,7 @@ while IFS= read -r -d '' source; do
 done < <(find "$package_dir/bin" -maxdepth 1 -type f -print0)
 
 chmod 755 "$user_home/.local/bin/noir-settings" "$user_home/.local/bin/noir-wallpaper" "$user_home/.local/bin/noir-palette" "$user_home/.local/bin/noir-launcher" "$user_home/.local/bin/noir-lockscreen" "$user_home/.local/bin/noir-backup" "$user_home/.local/bin/noir-notifications" "$user_home/.local/bin/noir-weather"
-chmod 755 "$user_home/.local/bin/noir-display-menu" "$user_home/.local/bin/noir-display-profile"
+chmod 755 "$user_home/.local/bin/noir-display-menu" "$user_home/.local/bin/noir-display-profile" "$user_home/.local/bin/noir-screenshot"
 
 echo "Noir Niri rice installed. Backups: $backup_root"
 echo "Log out and select Niri from your display manager, or restart Niri from an existing session."
