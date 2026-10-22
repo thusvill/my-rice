@@ -1,0 +1,347 @@
+#!/usr/bin/python3
+"""Noir Command+D launcher with application search, calculator, and currency conversion."""
+
+import ast
+import configparser
+import json
+import operator
+import os
+import re
+import shlex
+import subprocess
+import sys
+import urllib.request
+from pathlib import Path
+
+# Niri provides Wayland; choose it before GTK initializes a display backend.
+if os.environ.get("WAYLAND_DISPLAY"):
+    os.environ["GDK_BACKEND"] = "wayland"
+
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk
+
+
+HOME = Path.home()
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+STATE = CONFIG / "noir-rice" / "launcher.json"
+DEFAULT_STATE = {
+    "enabled": True,
+    "show_calculator": True,
+    "show_currency": True,
+    "prompt": "Launch / Calculate: ",
+    "width": 600,
+    "height": 360,
+    "max_results": 40,
+    "currency": "LKR",
+    "rates": {"LKR": 1.0, "USD": 0.0031, "EUR": 0.0029, "GBP": 0.0025, "INR": 0.28, "JPY": 0.48},
+}
+
+CSS = """
+window { background: transparent; color: #f3f3f5; }
+.launcher-shell { background: #000000; border: none; border-radius: 0; }
+entry { background: #000000; color: #f3f3f5; border: none; border-bottom: 1px solid #29292f; border-radius: 0; padding: 9px 12px; }
+entry:focus { border-bottom-color: #cfcfcf; }
+list { background: transparent; }
+row { padding: 7px 12px; border-radius: 2px; }
+row:hover, row:selected { background: #222226; }
+.result { color: #ffffff; font-size: 13px; font-weight: 600; }
+.detail { color: #9999a1; font-size: 10px; }
+"""
+
+
+def read_state():
+    try:
+        state = json.loads(STATE.read_text())
+        merged = dict(DEFAULT_STATE, **state)
+        merged["rates"] = dict(DEFAULT_STATE["rates"], **state.get("rates", {}))
+        return merged
+    except (OSError, ValueError):
+        return dict(DEFAULT_STATE)
+
+
+def write_state(state):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    STATE.write_text(json.dumps(state, indent=2) + "\n")
+
+
+def notify(title, body):
+    if shutil_which("notify-send"):
+        subprocess.Popen(["notify-send", "-a", "Noir Launcher", title, body], start_new_session=True)
+    if shutil_which("wl-copy"):
+        subprocess.run(["wl-copy"], input=body, text=True, check=False)
+
+
+def shutil_which(command):
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        path = Path(directory or ".") / command
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
+def menu(options, prompt):
+    command = ["fuzzel", "--dmenu", "--prompt", prompt, "--width", "64"]
+    result = subprocess.run(command, input="\n".join(options) + "\n", text=True, capture_output=True)
+    return result.stdout.strip()
+
+
+def query(prompt):
+    # Fuzzel's prompt-only dmenu mode accepts arbitrary input and returns it;
+    # passing a blank menu item makes typed expressions disappear.
+    result = subprocess.run(
+        ["fuzzel", "--dmenu", "--prompt-only", "--prompt", prompt, "--width", "64"],
+        text=True, capture_output=True,
+    )
+    return result.stdout.strip()
+
+
+def desktop_entries():
+    paths = []
+    for directory in (HOME / ".local/share/applications", Path("/usr/share/applications")):
+        if directory.is_dir():
+            paths.extend(directory.glob("*.desktop"))
+    entries = {}
+    for path in paths:
+        try:
+            parser = configparser.ConfigParser(interpolation=None, strict=False)
+            parser.read(path, encoding="utf-8")
+            if "Desktop Entry" not in parser:
+                continue
+            section = parser["Desktop Entry"]
+            if section.get("Type") != "Application" or section.get("NoDisplay", "false").lower() == "true":
+                continue
+            name = section.get("Name", path.stem)
+            command = section.get("Exec", "")
+            if command:
+                entries.setdefault(name, command)
+        except (OSError, KeyError, configparser.Error):
+            continue
+    return entries
+
+
+def safe_calculate(expression):
+    expression = expression.replace("^", "**").strip()
+    if not re.fullmatch(r"[0-9+\-*/%.()\s]+", expression):
+        raise ValueError("Only numbers and arithmetic operators are supported")
+    tree = ast.parse(expression, mode="eval")
+    operators = {
+        ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+        ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv,
+        ast.Mod: operator.mod, ast.Pow: operator.pow,
+        ast.USub: operator.neg, ast.UAdd: operator.pos,
+    }
+
+    def evaluate(node):
+        if isinstance(node, ast.Expression):
+            return evaluate(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return node.value
+        if isinstance(node, ast.UnaryOp) and type(node.op) in operators:
+            return operators[type(node.op)](evaluate(node.operand))
+        if isinstance(node, ast.BinOp) and type(node.op) in operators:
+            left, right = evaluate(node.left), evaluate(node.right)
+            if isinstance(node.op, ast.Pow) and abs(right) > 12:
+                raise ValueError("Exponent is too large")
+            return operators[type(node.op)](left, right)
+        raise ValueError("Invalid arithmetic expression")
+
+    value = evaluate(tree)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return f"{value:.10g}"
+
+
+def currency_convert(expression, state):
+    pattern = re.compile(
+        r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z]{3})\s*(?:to|in|->)\s*([A-Za-z]{3})\s*$",
+        re.IGNORECASE,
+    )
+    match = pattern.match(expression)
+    if not match:
+        pattern = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z]{3})\s+([A-Za-z]{3})\s*$", re.IGNORECASE)
+        match = pattern.match(expression)
+    if not match:
+        raise ValueError("Use: 100 USD to LKR")
+    amount, source, target = float(match.group(1)), match.group(2).upper(), match.group(3).upper()
+    rates = {key.upper(): float(value) for key, value in state.get("rates", {}).items()}
+    if source not in rates or target not in rates:
+        raise ValueError(f"Missing rate for {source} or {target}; edit rates in Noir Settings")
+    result = amount / rates[source] * rates[target]
+    return f"{amount:g} {source} = {result:,.2f} {target}"
+
+
+def process_query(expression, state):
+    try:
+        if re.search(r"\b(?:to|in|->)\b", expression, re.IGNORECASE) or re.fullmatch(r"\s*[0-9.]+\s+[A-Za-z]{3}\s+[A-Za-z]{3}\s*", expression):
+            return currency_convert(expression, state)
+        return f"= {safe_calculate(expression)}"
+    except (ValueError, SyntaxError, ZeroDivisionError) as error:
+        return f"Noir Launcher: {error}"
+
+
+def refresh_rates(state):
+    base = state.get("currency", "LKR").upper()
+    url = f"https://open.er-api.com/v6/latest/{base}"
+    with urllib.request.urlopen(url, timeout=4) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    rates = payload.get("rates", {})
+    if not rates:
+        raise RuntimeError("Currency service returned no rates")
+    state["rates"] = {key: float(rates[key]) for key in rates if key in {"LKR", "USD", "EUR", "GBP", "INR", "JPY", "AUD", "CAD", "CNY", "SGD"}}
+    state["rates"][base] = 1.0
+    write_state(state)
+    return f"Rates updated from {base}"
+
+
+class LauncherWindow(Gtk.Window):
+    def __init__(self, state):
+        super().__init__(title="Noir Launcher")
+        self.state = state
+        self.apps = desktop_entries()
+        self.set_default_size(int(state.get("width", 600)), int(state.get("height", 360)))
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_modal(False)
+        self.connect("key-press-event", self.on_key_press)
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS.encode())
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        shell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        shell.set_margin_top(14); shell.set_margin_bottom(14); shell.set_margin_start(14); shell.set_margin_end(14)
+        shell.get_style_context().add_class("launcher-shell")
+        self.add(shell)
+        self.search = Gtk.SearchEntry()
+        self.search.set_placeholder_text(state.get("prompt", "Launch / Calculate: ").strip() or "Launch / Calculate: ")
+        self.search.connect("search-changed", self.refresh)
+        self.search.connect("activate", self.activate_selected)
+        shell.pack_start(self.search, False, False, 0)
+        self.listbox = Gtk.ListBox()
+        self.listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.listbox.set_activate_on_single_click(False)
+        self.listbox.connect("row-activated", self.activate_row)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.add(self.listbox)
+        shell.pack_start(scroll, True, True, 0)
+        self.refresh()
+
+    def on_key_press(self, _window, event):
+        if event.keyval == Gdk.KEY_Escape:
+            self.destroy()
+            return True
+        return False
+
+    def clear_rows(self):
+        for row in self.listbox.get_children():
+            self.listbox.remove(row)
+
+    def add_row(self, title, detail, action):
+        row = Gtk.ListBoxRow()
+        row.action = action
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        heading = Gtk.Label(label=title, xalign=0)
+        heading.get_style_context().add_class("result")
+        description = Gtk.Label(label=detail, xalign=0)
+        description.get_style_context().add_class("detail")
+        content.pack_start(heading, False, False, 0)
+        content.pack_start(description, False, False, 0)
+        row.add(content)
+        self.listbox.add(row)
+
+    def is_math_query(self, text):
+        return bool(re.fullmatch(r"\s*[0-9+\-*/%.()\s^]+\s*", text)) and any(char.isdigit() for char in text)
+
+    def is_currency_query(self, text):
+        return bool(re.search(r"\b(?:to|in|->)\b", text, re.IGNORECASE) or
+                    re.fullmatch(r"\s*[0-9.]+\s+[A-Za-z]{3}\s+[A-Za-z]{3}\s*", text))
+
+    def refresh(self, *_):
+        text = self.search.get_text().strip()
+        self.clear_rows()
+        if text and self.state.get("show_calculator", True) and self.is_math_query(text):
+            try:
+                result = f"= {safe_calculate(text)}"
+                self.add_row(result, "Press Enter or click to copy the result", ("copy", result))
+            except (ValueError, SyntaxError, ZeroDivisionError) as error:
+                self.add_row("Invalid calculation", str(error), None)
+        elif text and self.state.get("show_currency", True) and self.is_currency_query(text):
+            try:
+                result = currency_convert(text, self.state)
+                self.add_row(result, "Press Enter or click to copy the result", ("copy", result))
+            except ValueError as error:
+                self.add_row("Currency conversion unavailable", str(error), None)
+        else:
+            if not text:
+                if self.state.get("show_calculator", True):
+                    self.add_row("Calculate expression", "Type arithmetic such as 2 + 3 * 4", ("prompt", ""))
+                if self.state.get("show_currency", True):
+                    self.add_row(f"Convert currency in {self.state.get('currency', 'LKR')}", "Type 100 USD to LKR", ("prompt", ""))
+            query_text = text.casefold()
+            shown = 0
+            for name in sorted(self.apps):
+                if not query_text or query_text in name.casefold():
+                    self.add_row(name, "Application", ("app", name))
+                    shown += 1
+                    if shown >= int(self.state.get("max_results", 40)):
+                        break
+        self.listbox.show_all()
+        first = self.listbox.get_row_at_index(0)
+        if first:
+            self.listbox.select_row(first)
+
+    def activate_selected(self, *_):
+        row = self.listbox.get_selected_row()
+        if row:
+            self.activate_row(self.listbox, row)
+
+    def activate_row(self, _listbox, row):
+        action = getattr(row, "action", None)
+        if not action:
+            return
+        kind, value = action
+        if kind == "copy":
+            notify("Noir Launcher", value)
+            self.destroy()
+        elif kind == "app":
+            command_line = re.sub(r"\s+%[fFuUdDnNickvm]", "", self.apps[value]).strip()
+            subprocess.Popen(shlex.split(command_line), start_new_session=True)
+            self.destroy()
+        elif kind == "prompt":
+            self.search.set_text("")
+            self.search.grab_focus()
+
+
+def main():
+    state = read_state()
+    command = sys.argv[1] if len(sys.argv) > 1 else "menu"
+    if command == "refresh-rates":
+        try:
+            print(refresh_rates(state))
+        except Exception as error:
+            print(f"Rate refresh failed: {error}", file=sys.stderr)
+            raise SystemExit(1)
+        return
+    if command == "calculate":
+        expression = " ".join(sys.argv[2:]) or query("Calculate: ")
+        if expression:
+            result = process_query(expression, state); notify("Noir Calculator", result)
+        return
+    if command == "convert":
+        expression = " ".join(sys.argv[2:]) or query(f"Convert ({state.get('currency', 'LKR')}): ")
+        if expression:
+            result = currency_convert(expression, state); notify("Noir Currency", result)
+        return
+
+    if not state.get("enabled", True):
+        subprocess.run(["fuzzel", "--show", "drun"], check=False)
+        return
+    window = LauncherWindow(state)
+    window.connect("destroy", Gtk.main_quit)
+    window.show_all()
+    window.search.grab_focus()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

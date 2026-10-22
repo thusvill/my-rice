@@ -50,6 +50,19 @@ layer-rule {
     }
 }
 
+// Keep the live Command+D launcher as a centered overlay, never a tiled window.
+window-rule {
+    match title="^Noir Launcher$"
+    open-floating true
+    open-focused true
+    border {
+        off
+    }
+    focus-ring {
+        off
+    }
+}
+
 spawn-at-startup "sh" "-c" "$HOME/.local/bin/noir-wallpaper init"
 spawn-at-startup "sh" "-c" "$HOME/.local/bin/noir-display-profile"
 spawn-at-startup "waybar"
@@ -58,7 +71,7 @@ spawn-at-startup "dunst"
 binds {
     // Mod is the Super/Command key for this rice.
     Mod+T { spawn "kitty"; }
-    Mod+D { spawn "fuzzel"; }
+    Mod+D { spawn "sh" "-c" "exec \"$HOME/.local/bin/noir-launcher\""; }
     Mod+S { spawn "sh" "-c" "$HOME/.local/bin/noir-settings"; }
     Mod+P { spawn "sh" "-c" "exec \"$HOME/.local/bin/noir-display-menu\""; }
     Mod+Escape { spawn "wlogout" "-b" "4" "-c" "16" "-r" "0" "-m" "340" "-s"; }

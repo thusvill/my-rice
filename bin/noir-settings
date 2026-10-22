@@ -29,6 +29,7 @@ LOCKSCREEN_STATE = CONFIG / "noir-rice" / "lockscreen.json"
 NVIM_STATE = CONFIG / "noir-rice" / "nvim.json"
 PALETTE_STATE = CONFIG / "noir-rice" / "palette.json"
 WALLPAPER_STATE = CONFIG / "noir-rice" / "wallpaper.json"
+LAUNCHER_STATE = CONFIG / "noir-rice" / "launcher.json"
 BIN = HOME / ".local" / "bin"
 WALLPAPER_DIR = HOME / "Pictures" / "Wallpapers"
 
@@ -92,6 +93,7 @@ class NoirSettings(Gtk.Window):
 
         self.add_page("ascii", "ASCII Wallpaper", "Generate monochrome wallpaper art", self.ascii_page())
         self.add_page("appearance", "Appearance", "Use wallpaper colors across the Noir rice", self.appearance_page())
+        self.add_page("launcher", "Launcher", "Calculator and currency conversion", self.launcher_page())
         self.add_page("waybar", "Status Bar", "Configure the Noir Waybar", self.waybar_page())
         self.add_page("terminal", "Terminal", "Configure the Noir Kitty terminal", self.terminal_page())
         self.add_page("editor", "Editor", "Configure the Noir Neovim theme", self.editor_page())
@@ -139,7 +141,7 @@ class NoirSettings(Gtk.Window):
         self.settings_search.set_margin_start(8); self.settings_search.set_margin_end(8); self.settings_search.set_margin_bottom(8)
         self.settings_search.connect("search-changed", self.filter_pages)
         side.pack_start(self.settings_search, False, False, 0)
-        pages = [("ascii", "▧  ASCII Wallpaper"), ("appearance", "Appearance"), ("waybar", "▤  Status Bar"), ("terminal", "Terminal"), ("editor", "Editor"),
+        pages = [("ascii", "▧  ASCII Wallpaper"), ("appearance", "Appearance"), ("launcher", "Launcher"), ("waybar", "▤  Status Bar"), ("terminal", "Terminal"), ("editor", "Editor"),
                  ("display", "▦  Displays"), ("lock", "◉  Lock Screen"), ("niri", "▦  Window Manager"),
                  ("presets", "Settings  Presets & Dotfiles"), ("diagnostics", "Diagnostics")]
         self.nav_buttons = {}
@@ -585,6 +587,142 @@ class NoirSettings(Gtk.Window):
             context.rectangle(index * swatch_width, 0, swatch_width + 1, height)
             context.fill()
         return False
+
+    def launcher_state(self):
+        defaults = {
+            "enabled": True, "show_calculator": True, "show_currency": True,
+            "prompt": "Launch / Calculate: ", "width": 600, "height": 360, "max_results": 40,
+            "currency": "LKR",
+            "rates": {"LKR": 1.0, "USD": 0.0031, "EUR": 0.0029, "GBP": 0.0025, "INR": 0.28, "JPY": 0.48},
+        }
+        try:
+            state = json.loads(LAUNCHER_STATE.read_text())
+            defaults.update(state)
+            defaults["rates"].update(state.get("rates", {}))
+        except (OSError, json.JSONDecodeError):
+            pass
+        return defaults
+
+    def launcher_page(self):
+        state = self.launcher_state()
+        box = self.page_box()
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card.set_margin_top(14); card.set_margin_bottom(14); card.set_margin_start(16); card.set_margin_end(16)
+        card.get_style_context().add_class("card")
+        title = Gtk.Label(label="COMMAND+D LAUNCHER", xalign=0); title.get_style_context().add_class("card-title")
+        copy = Gtk.Label(label="Search applications, calculate expressions, or convert currencies from the same keyboard-first menu. Results are copied to the clipboard and shown as a notification.", xalign=0)
+        copy.set_line_wrap(True); copy.get_style_context().add_class("card-copy")
+        card.pack_start(title, False, False, 0); card.pack_start(copy, False, False, 0)
+        self.launcher_enabled = Gtk.CheckButton(label="Enable calculator and currency tools in Command+D")
+        self.launcher_enabled.set_active(bool(state.get("enabled", True)))
+        card.pack_start(self.launcher_enabled, False, False, 3)
+        self.launcher_calculator = Gtk.CheckButton(label="Show calculator results while typing")
+        self.launcher_calculator.set_active(bool(state.get("show_calculator", True)))
+        self.launcher_currency_enabled = Gtk.CheckButton(label="Show currency results while typing")
+        self.launcher_currency_enabled.set_active(bool(state.get("show_currency", True)))
+        card.pack_start(self.launcher_calculator, False, False, 2)
+        card.pack_start(self.launcher_currency_enabled, False, False, 2)
+        self.launcher_prompt = self.entry(state.get("prompt", "Launch / Calculate: "), 220)
+        card.pack_start(self.waybar_field("Search prompt", self.launcher_prompt), False, False, 0)
+        self.launcher_width = Gtk.SpinButton.new_with_range(420, 1200, 10)
+        self.launcher_width.set_value(float(state.get("width", 600)))
+        self.launcher_height = Gtk.SpinButton.new_with_range(180, 800, 10)
+        self.launcher_height.set_value(float(state.get("height", 360)))
+        self.launcher_results = Gtk.SpinButton.new_with_range(5, 100, 1)
+        self.launcher_results.set_value(float(state.get("max_results", 40)))
+        card.pack_start(self.waybar_field("Overlay width", self.launcher_width), False, False, 0)
+        card.pack_start(self.waybar_field("Overlay height", self.launcher_height), False, False, 0)
+        card.pack_start(self.waybar_field("Maximum app results", self.launcher_results), False, False, 0)
+        self.launcher_currency = self.entry(state.get("currency", "LKR").upper(), 100)
+        card.pack_start(self.waybar_field("Base currency", self.launcher_currency), False, False, 0)
+        rates = []
+        for code, value in sorted(state.get("rates", {}).items()):
+            if code.upper() != self.launcher_currency.get_text().strip().upper():
+                rates.append(f"{code.upper()}={value:g}")
+        self.launcher_rates = self.entry(", ".join(rates), 420)
+        self.launcher_rates.set_tooltip_text("Rates are units of target currency per one base currency, for example USD=0.0031")
+        card.pack_start(self.waybar_field("Rates", self.launcher_rates), False, False, 0)
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        save = Gtk.Button(label="Save launcher settings"); save.get_style_context().add_class("action")
+        save.connect("clicked", self.save_launcher)
+        refresh = Gtk.Button(label="Refresh online rates"); refresh.get_style_context().add_class("secondary")
+        refresh.connect("clicked", lambda *_: self.launch(self.local("noir-launcher", "refresh-rates"), "Currency rates refresh started"))
+        test = Gtk.Button(label="Test Command+D tools"); test.get_style_context().add_class("secondary")
+        test.connect("clicked", lambda *_: self.launch(self.local("noir-launcher"), "Launcher opened"))
+        actions.pack_start(save, False, False, 0); actions.pack_start(refresh, False, False, 0); actions.pack_start(test, False, False, 0)
+        card.pack_start(actions, False, False, 5)
+        box.pack_start(card, False, False, 0)
+        preview = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        preview.set_margin_start(16); preview.set_margin_end(16); preview.set_margin_bottom(14)
+        preview.get_style_context().add_class("card")
+        preview.get_style_context().add_class("preview-card")
+        preview_title = Gtk.Label(label="COMMAND+D PREVIEW", xalign=0); preview_title.get_style_context().add_class("card-title")
+        preview_copy = Gtk.Label(label="The live overlay keeps the compact Noir launcher style while showing calculation and conversion results as you type.", xalign=0)
+        preview_copy.set_line_wrap(True); preview_copy.get_style_context().add_class("card-copy")
+        self.launcher_preview = Gtk.DrawingArea(); self.launcher_preview.set_size_request(-1, 170)
+        self.launcher_preview.connect("draw", self.draw_launcher_preview)
+        preview.pack_start(preview_title, False, False, 0); preview.pack_start(preview_copy, False, False, 0)
+        preview.pack_start(self.launcher_preview, False, False, 0)
+        box.pack_start(preview, False, False, 0)
+
+        self.launcher_enabled.connect("toggled", lambda *_: self.save_launcher())
+        self.launcher_calculator.connect("toggled", lambda *_: self.save_launcher())
+        self.launcher_currency_enabled.connect("toggled", lambda *_: self.save_launcher())
+        self.launcher_prompt.connect("changed", lambda *_: self.schedule_live("launcher", self.save_launcher, 500))
+        self.launcher_currency.connect("changed", lambda *_: self.schedule_live("launcher", self.save_launcher, 500))
+        self.launcher_rates.connect("changed", lambda *_: self.schedule_live("launcher", self.save_launcher, 700))
+        for widget in (self.launcher_width, self.launcher_height, self.launcher_results):
+            widget.connect("value-changed", lambda *_: self.schedule_live("launcher", self.save_launcher, 500))
+            widget.connect("value-changed", lambda *_: self.launcher_preview.queue_draw())
+        return box
+
+    def draw_launcher_preview(self, _area, context):
+        allocation = self.launcher_preview.get_allocation()
+        width, height = allocation.width, allocation.height
+        context.set_source_rgb(0.0, 0.0, 0.0); context.paint()
+        outer_width = min(width - 28, max(260, self.launcher_width.get_value() * 0.72))
+        outer_height = min(height - 18, max(110, self.launcher_height.get_value() * 0.40))
+        x, y = (width - outer_width) / 2, (height - outer_height) / 2
+        context.set_source_rgb(0.05, 0.05, 0.06); context.rectangle(x, y, outer_width, outer_height); context.fill()
+        context.set_source_rgb(0.16, 0.16, 0.18); context.rectangle(x, y, outer_width, 1); context.fill()
+        context.set_source_rgb(0.07, 0.07, 0.08); context.rectangle(x + 10, y + 10, outer_width - 20, 27); context.fill()
+        context.set_source_rgb(0.95, 0.95, 0.96); context.set_font_size(11)
+        context.move_to(x + 18, y + 28); context.show_text(self.launcher_prompt.get_text() or "Launch / Calculate: ")
+        context.set_source_rgb(0.80, 0.80, 0.82); context.move_to(x + 18, y + 59); context.show_text("Calculate expression")
+        context.set_source_rgb(0.58, 0.58, 0.62); context.move_to(x + 18, y + 79); context.show_text("100 USD to LKR   =   live conversion result")
+        context.set_source_rgb(0.40, 0.40, 0.44); context.move_to(x + 18, y + 99); context.show_text(f"{int(self.launcher_results.get_value())} app results maximum")
+        return False
+
+    def save_launcher(self, *_):
+        base = self.launcher_currency.get_text().strip().upper()
+        if not re.fullmatch(r"[A-Z]{3}", base):
+            self.set_status("Base currency must be a three-letter code such as LKR")
+            return
+        rates = {base: 1.0}
+        for item in self.launcher_rates.get_text().split(","):
+            item = item.strip()
+            if not item:
+                continue
+            match = re.fullmatch(r"([A-Za-z]{3})\s*=\s*([0-9]+(?:\.[0-9]+)?)", item)
+            if not match or float(match.group(2)) <= 0:
+                self.set_status(f"Invalid currency rate: {item}")
+                return
+            rates[match.group(1).upper()] = float(match.group(2))
+        try:
+            LAUNCHER_STATE.parent.mkdir(parents=True, exist_ok=True)
+            LAUNCHER_STATE.write_text(json.dumps({
+                "enabled": self.launcher_enabled.get_active(),
+                "show_calculator": self.launcher_calculator.get_active(),
+                "show_currency": self.launcher_currency_enabled.get_active(),
+                "prompt": self.launcher_prompt.get_text().strip() or "Launch / Calculate: ",
+                "width": int(self.launcher_width.get_value()),
+                "height": int(self.launcher_height.get_value()),
+                "max_results": int(self.launcher_results.get_value()),
+                "currency": base, "rates": rates,
+            }, indent=2) + "\n")
+            self.set_status("Launcher settings saved")
+        except OSError as error:
+            self.set_status(f"Launcher settings error: {error}")
 
     def populate_wallpapers(self):
         if not WALLPAPER_DIR.exists():
