@@ -109,12 +109,36 @@ function NetworkPopup() {
 
 // ── Display ───────────────────────────────────────────────────────────────────
 function DisplayPopup() {
-  const bright = createPoll(75, 1000, ["bash", "-c",
+  // Laptop backlight via brightnessctl
+  const bright = createPoll(75, 2000, ["bash", "-c",
     "brightnessctl -m 2>/dev/null | awk -F, 'NR==1{gsub(/%/,\"\",$4);print $4}' || echo 75"]);
+
+  // External monitor name via ddcutil
+  const extName = createPoll("External Display", 60000, ["bash", "-c",
+    "ddcutil detect 2>/dev/null | awk -F: '/Model:/{gsub(/^[ \t]+/,\"\",$2); if(length($2)>0){print $2; exit}}' || echo 'External Display'"]);
+
+  // External monitor brightness via ddcutil (VCP 0x10). Output: "cur/max" (e.g. "35/100")
+  const extBright = createPoll("N/A", 5000, ["bash", "-c",
+    "ddcutil getvcp 10 --display 1 --brief 2>/dev/null | awk '{print $4\"/\"$5}' || echo 'N/A'"]);
+
+  const extBrightVal = extBright.as((v: string) => {
+    if (!v || v === "N/A") return 0;
+    const parts = v.split("/");
+    if (parts.length !== 2) return 0;
+    const cur = parseInt(parts[0]);
+    const max = parseInt(parts[1]);
+    if (!Number.isFinite(cur) || !Number.isFinite(max) || max === 0) return 0;
+    return Math.max(0, Math.min(100, Math.round((cur / max) * 100)));
+  });
+
+  const hasDDC = extBright.as((v: string) => Boolean(v && v !== "N/A" && v.includes("/")));
 
   return (
     <box orientation={Gtk.Orientation.VERTICAL} spacing={10} cssClasses={["popup-content"]}>
       {Title("󰃠  BRIGHTNESS")}
+
+      {/* Laptop / internal display */}
+      <label label="  󰌢  Laptop display" cssClasses={["popup-label"]} halign={Gtk.Align.START} />
       <box orientation={Gtk.Orientation.HORIZONTAL} spacing={8}>
         <label label="󰃞" cssClasses={["popup-icon"]} />
         <slider hexpand min={0} max={100}
@@ -124,9 +148,47 @@ function DisplayPopup() {
         <label label={bright.as((v: number) => v + "%")} cssClasses={["popup-val"]} />
       </box>
       {Row([
-        Btn("󰃞 -5%",  () => command("brightnessctl", "set", "5%-")),
-        Btn("󰃠 +5%",  () => command("brightnessctl", "set", "5%+")),
+        Btn("󰃞 -5%", () => command("brightnessctl", "set", "5%-")),
+        Btn("󰃠 +5%", () => command("brightnessctl", "set", "5%+")),
       ])}
+
+      {/* External display via DDC/CI */}
+      {Sep()}
+      <label
+        label={extName.as((n: string) => `  󰍺  ${n || "External Display"}`)}
+        cssClasses={["popup-label"]}
+        halign={Gtk.Align.START}
+      />
+      <box orientation={Gtk.Orientation.HORIZONTAL} spacing={8}>
+        <label label="󰃞" cssClasses={["popup-icon"]} />
+        <slider hexpand min={0} max={100}
+          sensitive={hasDDC}
+          value={extBrightVal}
+          onValueChanged={(s) => {
+            const pct = Math.round(s.value);
+            command("bash", "-c", `pkill -f "ddcutil setvcp 10" 2>/dev/null; nohup ddcutil setvcp 10 ${pct} --display 1 >/dev/null 2>&1 &`);
+          }}
+        />
+        <label
+          label={extBright.as((v: string) => {
+            if (!v || v === "N/A") return "N/A";
+            const parts = v.split("/");
+            if (parts.length !== 2) return "?";
+            const cur = parseInt(parts[0]);
+            const max = parseInt(parts[1]);
+            if (!Number.isFinite(cur) || !Number.isFinite(max) || max === 0) return "?";
+            return Math.round((cur / max) * 100) + "%";
+          })}
+          cssClasses={["popup-val"]}
+        />
+      </box>
+      {Row([
+        Btn("󰃞 -5%", () => command("bash", "-c",
+          "cur=$(ddcutil getvcp 10 --display 1 --brief 2>/dev/null | awk '{print $4}'); if [ -n \"$cur\" ]; then next=$((cur-5<0?0:cur-5)); pkill -f 'ddcutil setvcp 10' 2>/dev/null; nohup ddcutil setvcp 10 \"$next\" --display 1 >/dev/null 2>&1 & fi")),
+        Btn("󰃠 +5%", () => command("bash", "-c",
+          "cur=$(ddcutil getvcp 10 --display 1 --brief 2>/dev/null | awk '{print $4}'); max=$(ddcutil getvcp 10 --display 1 --brief 2>/dev/null | awk '{print $5}'); if [ -n \"$cur\" ] && [ -n \"$max\" ]; then next=$((cur+5>max?max:cur+5)); pkill -f 'ddcutil setvcp 10' 2>/dev/null; nohup ddcutil setvcp 10 \"$next\" --display 1 >/dev/null 2>&1 & fi")),
+      ])}
+
       {Sep()}
       {Title("󰍺  DISPLAY PROFILES")}
       {Row([

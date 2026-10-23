@@ -51,17 +51,21 @@ button.workspace {
   min-height: ${settings.height}px;
 }
 button.workspace-active {
-  background: var(--noir-surface, #1a1a1e);
-  color:      var(--noir-foreground, #f3f3f5);
-  border:     1px solid var(--noir-border, #29292f);
+  background: var(--noir-accent, #cfcfcf);
+  color:      var(--noir-background, #000000);
+  border:     1px solid var(--noir-accent, #cfcfcf);
   border-radius: ${settings.radius}px;
+  font-weight: 700;
   padding:    1px ${settings.padding}px;
   min-height: ${settings.height}px;
 }
-button.workspace:hover,
-button.workspace-active:hover {
+button.workspace:hover {
   background: var(--noir-surface, #1a1a1e);
-  color:      #fff;
+  color:      var(--noir-foreground, #f3f3f5);
+}
+button.workspace-active:hover {
+  background: var(--noir-accent, #cfcfcf);
+  color:      var(--noir-background, #000000);
 }
 label.bar-stat {
   color:   var(--noir-muted, #9999a1);
@@ -156,7 +160,6 @@ app.start({ css: css + theme, main() {
 
     for (const pw of PopupWindows(monitor)) {
       app.add_window(pw);
-      pw.present();
     }
   }
 } });
