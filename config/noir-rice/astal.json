@@ -1,8 +1,17 @@
 {
   "height": 32,
   "spacing": 8,
+  "font_size": 11,
+  "padding": 6,
+  "radius": 4,
   "clock_format": "%H:%M %a, %b %d",
   "weather_location": "Colombo",
   "opacity": 100,
-  "visible_modules": ["workspaces", "clock", "weather", "audio", "network", "display", "bluetooth", "media", "notifications", "system"]
+  "background": "#000000",
+  "surface": "#121215",
+  "foreground": "#f3f3f5",
+  "muted": "#9999a1",
+  "border": "#29292f",
+  "accent": "#cfcfcf",
+  "visible_modules": ["workspaces", "clock", "weather", "notifications", "cpu", "memory", "disk", "volume", "mic", "brightness", "battery", "network", "bluetooth", "settings", "power"]
 }

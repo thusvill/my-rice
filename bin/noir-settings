@@ -1787,37 +1787,188 @@ class NoirSettings(Gtk.Window):
             state = json.loads(ASTAL_STATE.read_text())
         except (OSError, ValueError):
             pass
-        settings = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        settings.set_margin_top(14); settings.set_margin_bottom(14); settings.set_margin_start(16); settings.set_margin_end(16)
-        settings.get_style_context().add_class("card")
-        settings.pack_start(Gtk.Label(label="ASTAL SHELL PREFERENCES", xalign=0), False, False, 0)
-        self.astal_height = Gtk.SpinButton.new_with_range(24, 64, 1); self.astal_height.set_value(state.get("height", 32))
-        self.astal_spacing = Gtk.SpinButton.new_with_range(0, 24, 1); self.astal_spacing.set_value(state.get("spacing", 8))
-        self.astal_clock = self.entry(state.get("clock_format", "%H:%M %a, %b %d"), 300)
-        self.astal_weather = self.entry(state.get("weather_location", "Colombo"), 220)
-        for label, widget in (("Bar height", self.astal_height), ("Module spacing", self.astal_spacing), ("Clock format", self.astal_clock), ("Weather location", self.astal_weather)):
-            settings.pack_start(self.waybar_field(label, widget), False, False, 0)
-        save = Gtk.Button(label="Save Astal preferences")
-        save.get_style_context().add_class("action"); save.connect("clicked", self.save_astal_settings)
-        settings.pack_start(save, False, False, 4)
-        box.pack_start(settings, False, False, 0)
+        defaults = {
+            "height": 32, "spacing": 8, "font_size": 11, "padding": 6, "radius": 4,
+            "opacity": 100, "clock_format": "%H:%M %a, %b %d", "weather_location": "Colombo",
+            "background": "#000000", "surface": "#121215", "foreground": "#f3f3f5",
+            "muted": "#9999a1", "border": "#29292f", "accent": "#cfcfcf",
+        }
+        defaults.update(state)
+        module_names = (
+            ("workspaces", "Workspaces"), ("clock", "Clock"), ("weather", "Weather"),
+            ("notifications", "Notifications"), ("cpu", "CPU"), ("memory", "Memory"),
+            ("disk", "Disk"), ("volume", "Output volume"), ("mic", "Microphone"),
+            ("brightness", "Brightness"), ("battery", "Battery"), ("network", "Network"),
+            ("bluetooth", "Bluetooth"), ("settings", "Quick settings"), ("power", "Power menu"),
+        )
+        old_modules = set(defaults.get("visible_modules", []))
+        aliases = {"volume": "audio", "mic": "audio", "brightness": "display",
+                   "settings": "quick", "power": "system"}
+        self.astal_modules = {}
+        module_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        module_card.set_margin_top(14); module_card.set_margin_bottom(14)
+        module_card.set_margin_start(16); module_card.set_margin_end(16)
+        module_card.get_style_context().add_class("card")
+        title = Gtk.Label(label="VISIBLE MODULES", xalign=0); title.get_style_context().add_class("card-title")
+        module_card.pack_start(title, False, False, 0)
+        grid = Gtk.Grid(column_spacing=18, row_spacing=5)
+        for index, (key, label) in enumerate(module_names):
+            toggle = Gtk.CheckButton(label=label)
+            toggle.set_active(key in old_modules or aliases.get(key) in old_modules)
+            self.astal_modules[key] = toggle
+            grid.attach(toggle, index % 3, index // 3, 1, 1)
+        module_card.pack_start(grid, False, False, 0)
+
+        layout_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        layout_card.set_margin_top(14); layout_card.set_margin_bottom(14)
+        layout_card.set_margin_start(16); layout_card.set_margin_end(16)
+        layout_card.get_style_context().add_class("card")
+        title = Gtk.Label(label="BAR LAYOUT", xalign=0); title.get_style_context().add_class("card-title")
+        layout_card.pack_start(title, False, False, 0)
+        self.astal_height = Gtk.SpinButton.new_with_range(10, 72, 1); self.astal_height.set_value(defaults["height"])
+        self.astal_spacing = Gtk.SpinButton.new_with_range(0, 28, 1); self.astal_spacing.set_value(defaults["spacing"])
+        self.astal_font_size = Gtk.SpinButton.new_with_range(8, 20, 1); self.astal_font_size.set_value(defaults["font_size"])
+        self.astal_padding = Gtk.SpinButton.new_with_range(0, 24, 1); self.astal_padding.set_value(defaults["padding"])
+        self.astal_radius = Gtk.SpinButton.new_with_range(0, 20, 1); self.astal_radius.set_value(defaults["radius"])
+        self.astal_opacity = Gtk.SpinButton.new_with_range(40, 100, 1); self.astal_opacity.set_value(defaults["opacity"])
+        self.astal_clock = self.entry(defaults["clock_format"], 300)
+        self.astal_weather = self.entry(defaults["weather_location"], 220)
+        for label, widget in (("Bar height", self.astal_height), ("Module spacing", self.astal_spacing),
+                              ("Font size", self.astal_font_size), ("Horizontal padding", self.astal_padding),
+                              ("Corner radius", self.astal_radius), ("Opacity", self.astal_opacity),
+                              ("Clock format", self.astal_clock), ("Weather location", self.astal_weather)):
+            layout_card.pack_start(self.waybar_field(label, widget), False, False, 0)
+
+        color_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        color_card.set_margin_top(14); color_card.set_margin_bottom(14)
+        color_card.set_margin_start(16); color_card.set_margin_end(16)
+        color_card.get_style_context().add_class("card")
+        title = Gtk.Label(label="BAR COLORS", xalign=0); title.get_style_context().add_class("card-title")
+        color_card.pack_start(title, False, False, 0)
+        self.astal_colors = {}
+        for key, label in (("background", "Background"), ("surface", "Active module"),
+                           ("foreground", "Text"), ("muted", "Secondary text"),
+                           ("border", "Border"), ("accent", "Accent")):
+            control, field = self.color_control(defaults[key])
+            self.astal_colors[key] = field
+            color_card.pack_start(self.waybar_field(label, control), False, False, 0)
+
+        self.astal_preview = Gtk.DrawingArea(); self.astal_preview.set_size_request(-1, 104)
+        self.astal_preview.connect("draw", self.draw_astal_preview)
+        preview_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        preview_card.set_margin_start(16); preview_card.set_margin_end(16); preview_card.set_margin_bottom(14)
+        preview_card.get_style_context().add_class("card")
+        preview_card.get_style_context().add_class("preview-card")
+        title = Gtk.Label(label="LIVE BAR PREVIEW", xalign=0); title.get_style_context().add_class("card-title")
+        preview_card.pack_start(title, False, False, 0)
+        preview_card.pack_start(self.astal_preview, False, False, 0)
+        box.pack_start(preview_card, False, False, 0)
+        box.pack_start(layout_card, False, False, 0)
+        box.pack_start(color_card, False, False, 0)
+        box.pack_start(module_card, False, False, 0)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        actions.set_margin_start(16); actions.set_margin_bottom(16)
+        save = Gtk.Button(label="Save and reload bar")
+        save.get_style_context().add_class("action"); save.connect("clicked", self.apply_astal_settings)
+        actions.pack_start(save, False, False, 0)
+        box.pack_start(actions, False, False, 0)
+
+        for widget in (self.astal_height, self.astal_spacing, self.astal_font_size,
+                       self.astal_padding, self.astal_radius, self.astal_opacity):
+            widget.connect("value-changed", lambda *_: self.astal_preview.queue_draw())
+        for widget in (self.astal_clock, self.astal_weather, *self.astal_colors.values()):
+            widget.connect("changed", lambda *_: self.astal_preview.queue_draw())
+        for toggle in self.astal_modules.values():
+            toggle.connect("toggled", lambda *_: self.astal_preview.queue_draw())
         box.pack_start(self.card("ACTIVE ASTAL SHELL", "The bar and all anchored GTK popovers run in one AGS process. Preferences are stored in ~/.config/noir-rice/astal.json.", [
-            ("Reload shell", lambda *_: self.reload_astal(), True),
             ("Check dependencies", lambda *_: self.launch(self.local("noir-astal-check"), "Astal dependency check started"), False),
-        ]), False, False, 0)
-        box.pack_start(self.card("MODULES", "Optional services show an unavailable state when their Astal library is not installed. Waybar remains available only as rollback material.", [
-            ("Open Astal files", lambda *_: self.launch(["kitty", "--directory", str(ASTAL)], "Astal directory opened"), False),
         ]), False, False, 0)
         return box
 
     def save_astal_settings(self, *_):
-        ASTAL_STATE.parent.mkdir(parents=True, exist_ok=True)
-        ASTAL_STATE.write_text(json.dumps({
+        self.astal_settings_saved = False
+        colors = {key: field.get_text().strip() or fallback for (key, fallback), field
+                  in zip((("background", "#000000"), ("surface", "#121215"),
+                          ("foreground", "#f3f3f5"), ("muted", "#9999a1"),
+                          ("border", "#29292f"), ("accent", "#cfcfcf")),
+                         self.astal_colors.values())}
+        if any(not re.fullmatch(r"#[0-9a-fA-F]{6}", color) for color in colors.values()):
+            self.set_status("Astal colors must use #RRGGBB format")
+            return
+        values = {
             "height": int(self.astal_height.get_value()), "spacing": int(self.astal_spacing.get_value()),
-            "clock_format": self.astal_clock.get_text(), "weather_location": self.astal_weather.get_text().strip() or "Colombo",
-            "opacity": 100, "visible_modules": ["workspaces", "clock", "weather", "audio", "network", "display", "bluetooth", "media", "notifications", "system"],
-        }, indent=2) + "\n")
-        self.set_status("Astal preferences saved; reload the shell to apply")
+            "font_size": int(self.astal_font_size.get_value()), "padding": int(self.astal_padding.get_value()),
+            "radius": int(self.astal_radius.get_value()), "opacity": int(self.astal_opacity.get_value()),
+            "clock_format": self.astal_clock.get_text().strip() or "%H:%M %a, %b %d",
+            "weather_location": self.astal_weather.get_text().strip() or "Colombo",
+            "visible_modules": [key for key, toggle in self.astal_modules.items() if toggle.get_active()],
+        }
+        values.update(colors)
+        try:
+            ASTAL_STATE.parent.mkdir(parents=True, exist_ok=True)
+            ASTAL_STATE.write_text(json.dumps(values, indent=2) + "\n")
+            self.astal_settings_saved = True
+            self.set_status("Astal preferences saved")
+        except OSError as error:
+            self.set_status(f"Astal settings error: {error}")
+
+    def draw_astal_preview(self, _area, context):
+        allocation = self.astal_preview.get_allocation()
+        width, height = allocation.width, allocation.height
+        context.set_source_rgb(0.035, 0.035, 0.04); context.paint()
+        background = self.preview_color(self.astal_colors["background"], "000000")
+        surface = self.preview_color(self.astal_colors["surface"], "121215")
+        foreground = self.preview_color(self.astal_colors["foreground"], "f3f3f5")
+        muted = self.preview_color(self.astal_colors["muted"], "9999a1")
+        border = self.preview_color(self.astal_colors["border"], "29292f")
+        accent = self.preview_color(self.astal_colors["accent"], "cfcfcf")
+        bar_height = min(height - 20, max(10, self.astal_height.get_value()))
+        x, y, bar_width = 10, (height - bar_height) / 2, width - 20
+        self.rounded_rect(context, x, y, bar_width, bar_height, min(self.astal_radius.get_value(), bar_height / 2))
+        context.set_source_rgba(background[0], background[1], background[2],
+                                background[3] * self.astal_opacity.get_value() / 100)
+        context.fill_preserve()
+        context.set_source_rgba(*border); context.set_line_width(1); context.stroke()
+        size = max(8, min(14, self.astal_font_size.get_value()))
+        context.select_font_face("JetBrains Mono", 0, 0); context.set_font_size(size)
+        gap = " " * max(1, round(self.astal_spacing.get_value() / 2))
+        inset = self.astal_padding.get_value() + 4
+        left, middle, right = [], [], []
+        if self.astal_modules["workspaces"].get_active(): left.append("1   2   3")
+        if self.astal_modules["settings"].get_active(): left.append("⚙")
+        if self.astal_modules["clock"].get_active(): middle.append("12:45")
+        if self.astal_modules["weather"].get_active(): middle.append("☁ 18°C")
+        if self.astal_modules["notifications"].get_active(): middle.append("●")
+        for key, label in (("cpu", "CPU 8%"), ("memory", "RAM 42%"), ("disk", "DISK 30%"),
+                           ("volume", "VOL 35%"), ("mic", "MIC"), ("brightness", "☼"),
+                           ("battery", "BAT 82%"), ("network", "Wi-Fi"), ("bluetooth", "BT"),
+                           ("power", "⏻")):
+            if self.astal_modules[key].get_active(): right.append(label)
+        if self.astal_modules["workspaces"].get_active():
+            context.set_source_rgba(*surface)
+            chip_width = max(24, size * 2.1)
+            self.rounded_rect(context, x + inset - 3, y + max(3, (bar_height - size - 8) / 2),
+                              chip_width, min(bar_height - 6, size + 8), min(self.astal_radius.get_value(), 5))
+            context.fill()
+        context.set_source_rgba(*muted)
+        context.move_to(x + inset, y + bar_height / 2 + size / 3); context.show_text(gap.join(left))
+        center_text = gap.join(middle)
+        extents = context.text_extents(center_text)
+        context.set_source_rgba(*foreground)
+        context.move_to(x + (bar_width - extents.width) / 2, y + bar_height / 2 + size / 3)
+        context.show_text(center_text)
+        right_text = gap.join(right)
+        extents = context.text_extents(right_text)
+        context.set_source_rgba(*accent)
+        context.move_to(x + bar_width - extents.width - inset, y + bar_height / 2 + size / 3)
+        context.show_text(right_text)
+        return False
+
+    def apply_astal_settings(self, *_):
+        self.save_astal_settings()
+        if self.astal_settings_saved:
+            self.reload_astal()
 
     def reload_astal(self):
         subprocess.run(["ags", "quit"], stderr=subprocess.DEVNULL)
