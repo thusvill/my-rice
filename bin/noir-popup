@@ -1,0 +1,30 @@
+#!/usr/bin/python3
+"""Low-overhead Waybar client for the resident Noir popup daemon."""
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+runtime = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+socket_path = runtime / "noir-popup.sock"
+section = sys.argv[2] if len(sys.argv) > 2 and sys.argv[1] == "toggle" else (sys.argv[1] if len(sys.argv) > 1 else "all")
+
+def send():
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(0.25)
+    client.connect(str(socket_path))
+    client.sendall(json.dumps({"section": section}).encode())
+    client.close()
+
+try:
+    send()
+except OSError:
+    daemon = os.environ.get("HOME", "") + "/.local/bin/noir-topbar"
+    if os.path.exists(daemon):
+        subprocess.Popen([daemon, "--daemon"], start_new_session=True)
+        time.sleep(0.12)
+        try: send()
+        except OSError: pass

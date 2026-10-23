@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+has_gi() {
+    gjs -c "imports.gi.$1" >/dev/null 2>&1
+}
+
+runtime_ready() {
+    command -v ags >/dev/null 2>&1 && command -v gjs >/dev/null 2>&1 &&
+        command -v meson >/dev/null 2>&1 && command -v ninja >/dev/null 2>&1 &&
+        command -v npm >/dev/null 2>&1 && command -v go >/dev/null 2>&1 &&
+        has_gi Astal && has_gi AstalWp && has_gi AstalNetwork
+}
+
+if runtime_ready; then
+    echo "AGS and Astal runtime dependencies are already installed."
+    exit 0
+fi
+
+if [[ ! -r /etc/arch-release ]]; then
+    echo "AGS/Astal is missing. Install AGS v3, Astal IO/GTK4, AstalWp, and AstalNetwork for your distribution, then rerun apply.sh." >&2
+    exit 1
+fi
+
+echo "Installing AGS/Astal build dependencies with pacman..."
+sudo pacman -S --needed base-devel git npm meson ninja go gobject-introspection gtk3 gtk-layer-shell gtk4 gtk4-layer-shell
+
+aur_helper=""
+if command -v yay >/dev/null 2>&1; then
+    aur_helper="yay"
+elif command -v paru >/dev/null 2>&1; then
+    aur_helper="paru"
+else
+    echo "No AUR helper found; building yay from the official AUR repository..."
+    build_dir="$(mktemp -d "${TMPDIR:-/tmp}/noir-yay.XXXXXX")"
+    trap 'rm -rf -- "$build_dir"' EXIT
+    git clone https://aur.archlinux.org/yay.git "$build_dir/yay"
+    (cd "$build_dir/yay" && makepkg -si)
+    aur_helper="yay"
+fi
+
+echo "Installing AGS v3 and Astal libraries from the Arch AUR..."
+"$aur_helper" -S --needed aylurs-gtk-shell-git libastal-meta
+
+if ! runtime_ready; then
+    echo "AGS/Astal installation finished, but required GJS libraries are still unavailable." >&2
+    exit 1
+fi
+echo "AGS and Astal runtime dependencies are ready."

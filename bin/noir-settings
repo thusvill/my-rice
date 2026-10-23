@@ -21,7 +21,9 @@ from gi.repository import Gtk, Gdk, GLib, GdkPixbuf
 
 HOME = Path.home()
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
-WAYBAR = CONFIG / "waybar"
+WAYBAR = CONFIG / "waybar"  # rollback/reference only
+ASTAL = CONFIG / "astal"
+ASTAL_STATE = CONFIG / "noir-rice" / "astal.json"
 KITTY_CONFIG = CONFIG / "kitty" / "kitty.conf"
 NIRI_CONFIG = CONFIG / "niri" / "config.kdl"
 SWAYLOCK_CONFIG = CONFIG / "swaylock" / "config"
@@ -94,7 +96,7 @@ class NoirSettings(Gtk.Window):
         self.add_page("wallpaper", "Wallpaper", "Choose, dither, and preview your desktop wallpaper", self.wallpaper_page())
         self.add_page("appearance", "Appearance", "Use wallpaper colors across the Noir rice", self.appearance_page())
         self.add_page("launcher", "Launcher", "Calculator and currency conversion", self.launcher_page())
-        self.add_page("waybar", "Status Bar", "Configure the Noir Waybar", self.waybar_page())
+        self.add_page("astal", "Astal Shell", "Configure the active AGS bar and native popups", self.astal_page())
         self.add_page("terminal", "Terminal", "Configure the Noir Kitty terminal", self.terminal_page())
         self.add_page("editor", "Editor", "Configure the Noir Neovim theme", self.editor_page())
         self.add_page("display", "Displays", "Choose primary, secondary, mirror, or extend", self.display_page())
@@ -141,7 +143,7 @@ class NoirSettings(Gtk.Window):
         self.settings_search.set_margin_start(8); self.settings_search.set_margin_end(8); self.settings_search.set_margin_bottom(8)
         self.settings_search.connect("search-changed", self.filter_pages)
         side.pack_start(self.settings_search, False, False, 0)
-        pages = [("wallpaper", "▧  Wallpaper"), ("appearance", "Appearance"), ("launcher", "Launcher"), ("waybar", "▤  Status Bar"), ("terminal", "Terminal"), ("editor", "Editor"),
+        pages = [("wallpaper", "▧  Wallpaper"), ("appearance", "Appearance"), ("launcher", "Launcher"), ("astal", "▤  Astal Shell"), ("terminal", "Terminal"), ("editor", "Editor"),
                  ("display", "▦  Displays"), ("lock", "◉  Lock Screen"), ("niri", "▦  Window Manager"),
                  ("presets", "Settings  Presets & Dotfiles"), ("diagnostics", "Diagnostics")]
         self.nav_buttons = {}
@@ -1757,14 +1759,15 @@ class NoirSettings(Gtk.Window):
             self.set_status(f"Backup error: {error}")
 
     def run_diagnostics(self):
-        required = ("niri", "waybar", "kitty", "swaylock", "swaybg", "fuzzel", "jq")
+        required = ("niri", "ags", "gjs", "kitty", "swaylock", "swaybg", "fuzzel", "jq")
         optional = ("magick", "wl-mirror", "nwg-displays", "fc-match")
         lines = ["NOIR DIAGNOSTICS"]
         for command in required:
             lines.append(f"{'OK  ' if shutil.which(command) else 'MISS'} required: {command}")
         for command in optional:
             lines.append(f"{'OK  ' if shutil.which(command) else '----'} optional: {command}")
-        checks = (("Waybar JSON", ["jq", "empty", str(WAYBAR / "config.jsonc")]),
+        checks = (("Astal shell", [str(BIN / "noir-astal-check")]),
+                  ("Astal project", ["test", "-f", str(ASTAL / "app.tsx")]),
                   ("Niri KDL", ["niri", "validate", "-c", str(NIRI_CONFIG)]),
                   ("Settings Python", ["python3", "-m", "py_compile", str(BIN / "noir-settings")]))
         for label, command in checks:
@@ -1776,6 +1779,49 @@ class NoirSettings(Gtk.Window):
         lines.append(f"Backups: {HOME / '.local/state/noir-rice/backups'}")
         self.diagnostic_output.set_text("\n".join(lines))
         self.set_status("Diagnostics completed")
+
+    def astal_page(self):
+        box = self.page_box()
+        state = {}
+        try:
+            state = json.loads(ASTAL_STATE.read_text())
+        except (OSError, ValueError):
+            pass
+        settings = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        settings.set_margin_top(14); settings.set_margin_bottom(14); settings.set_margin_start(16); settings.set_margin_end(16)
+        settings.get_style_context().add_class("card")
+        settings.pack_start(Gtk.Label(label="ASTAL SHELL PREFERENCES", xalign=0), False, False, 0)
+        self.astal_height = Gtk.SpinButton.new_with_range(24, 64, 1); self.astal_height.set_value(state.get("height", 32))
+        self.astal_spacing = Gtk.SpinButton.new_with_range(0, 24, 1); self.astal_spacing.set_value(state.get("spacing", 8))
+        self.astal_clock = self.entry(state.get("clock_format", "%H:%M %a, %b %d"), 300)
+        self.astal_weather = self.entry(state.get("weather_location", "Colombo"), 220)
+        for label, widget in (("Bar height", self.astal_height), ("Module spacing", self.astal_spacing), ("Clock format", self.astal_clock), ("Weather location", self.astal_weather)):
+            settings.pack_start(self.waybar_field(label, widget), False, False, 0)
+        save = Gtk.Button(label="Save Astal preferences")
+        save.get_style_context().add_class("action"); save.connect("clicked", self.save_astal_settings)
+        settings.pack_start(save, False, False, 4)
+        box.pack_start(settings, False, False, 0)
+        box.pack_start(self.card("ACTIVE ASTAL SHELL", "The bar and all anchored GTK popovers run in one AGS process. Preferences are stored in ~/.config/noir-rice/astal.json.", [
+            ("Reload shell", lambda *_: self.reload_astal(), True),
+            ("Check dependencies", lambda *_: self.launch(self.local("noir-astal-check"), "Astal dependency check started"), False),
+        ]), False, False, 0)
+        box.pack_start(self.card("MODULES", "Optional services show an unavailable state when their Astal library is not installed. Waybar remains available only as rollback material.", [
+            ("Open Astal files", lambda *_: self.launch(["kitty", "--directory", str(ASTAL)], "Astal directory opened"), False),
+        ]), False, False, 0)
+        return box
+
+    def save_astal_settings(self, *_):
+        ASTAL_STATE.parent.mkdir(parents=True, exist_ok=True)
+        ASTAL_STATE.write_text(json.dumps({
+            "height": int(self.astal_height.get_value()), "spacing": int(self.astal_spacing.get_value()),
+            "clock_format": self.astal_clock.get_text(), "weather_location": self.astal_weather.get_text().strip() or "Colombo",
+            "opacity": 100, "visible_modules": ["workspaces", "clock", "weather", "audio", "network", "display", "bluetooth", "media", "notifications", "system"],
+        }, indent=2) + "\n")
+        self.set_status("Astal preferences saved; reload the shell to apply")
+
+    def reload_astal(self):
+        subprocess.run(["ags", "quit"], stderr=subprocess.DEVNULL)
+        self.launch(["ags", "run", str(ASTAL / "app.tsx")], "Astal shell reloaded")
 
     def apply_noir_preset(self):
         self.wb_height.set_value(32); self.wb_spacing.set_value(8); self.wb_font_size.set_value(11)
@@ -1792,8 +1838,8 @@ class NoirSettings(Gtk.Window):
         self.apply_waybar(); self.apply_niri()
 
     def reload_all(self):
-        self.reload_waybar()
-        self.launch(["niri", "msg", "action", "load-config-file"], "Waybar and Niri reloaded")
+        self.reload_astal()
+        self.launch(["niri", "msg", "action", "load-config-file"], "Astal and Niri reloaded")
 
 
 def main():

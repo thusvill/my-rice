@@ -29,7 +29,7 @@ window#waybar {
     border-color: #3a3a42;
 }
 #workspaces button:hover { color: #ffffff; background: #18181c; }
-#custom-layout, #clock, #custom-weather, #custom-notifications, #cpu, #memory, #disk, #pulseaudio, #pulseaudio\#microphone, #network, #battery, #custom-settings, #custom-power { padding: 0 7px; }
+#custom-layout, #clock, #custom-weather, #custom-notifications, #cpu, #memory, #disk, #pulseaudio, #pulseaudio\#microphone, #network, #battery, #custom-brightness, #custom-settings, #custom-power { padding: 0 7px; }
 #custom-layout { color: #777780; margin-left: 3px; font-size: 13px; }
 #clock { color: #f3f3f5; font-weight: 600; }
 #custom-weather { color: #c2c2c8; }
@@ -37,6 +37,7 @@ window#waybar {
 #tray { margin-right: 3px; }
 #tray > .passive { -gtk-icon-effect: dim; }
 #pulseaudio, #pulseaudio\#microphone, #network, #battery { color: #a9a9b1; }
+#custom-brightness { color: #bdbdbd; }
 #cpu, #memory, #disk { color: #8f8f98; font-size: 10px; }
 #custom-power { color: #eeeeee; margin-right: 3px; }
 #custom-settings { color: #bdbdbd; }

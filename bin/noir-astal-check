@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -u
+
+ok=0
+check() {
+    if command -v "$1" >/dev/null 2>&1; then
+        printf 'OK   %s\n' "$1"
+    else
+        printf 'MISS %s\n' "$1"
+        ok=1
+    fi
+}
+
+check ags
+check gjs
+check meson
+check ninja
+check npm
+check go
+if command -v gjs >/dev/null 2>&1; then
+    for library in Astal AstalWp AstalNetwork; do
+        if gjs -c "imports.gi.${library}" >/dev/null 2>&1; then
+            printf 'OK   GJS %s\n' "$library"
+        else
+            printf 'MISS GJS %s\n' "$library"
+            ok=1
+        fi
+    done
+fi
+if command -v ags >/dev/null 2>&1; then
+    bundle_file="$(mktemp "${TMPDIR:-/tmp}/noir-astal-check.XXXXXX.js")"
+    if timeout 60s ags bundle "${HOME}/.config/astal/app.tsx" "$bundle_file" --root "${HOME}/.config/astal" --gtk 4 >/dev/null 2>&1; then
+        printf 'OK   AGS bundle\n'
+    else
+        printf 'FAIL AGS bundle (see: ags bundle ~/.config/astal/app.tsx /tmp/noir-astal.js --root ~/.config/astal --gtk 4)\n'
+        ok=1
+    fi
+    rm -f "$bundle_file"
+fi
+exit "$ok"

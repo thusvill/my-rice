@@ -1,0 +1,370 @@
+#!/usr/bin/python3
+"""Noir quick controls popup used by every interactive Waybar module."""
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import atexit
+import json
+from pathlib import Path
+
+if os.environ.get("WAYLAND_DISPLAY"):
+    os.environ["GDK_BACKEND"] = "wayland"
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("GtkLayerShell", "0.1")
+from gi.repository import Gtk, Gdk, GLib
+from gi.repository import GtkLayerShell
+
+STATE_FILE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "noir-topbar-popup.json"
+SOCKET_FILE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "noir-popup.sock"
+
+
+CSS = """
+* { font-family: Inter, sans-serif; }
+window { background: #0b0b0d; color: #f3f3f5; border: 1px solid #2a2a30; }
+.title { color: #fff; font-size: 16px; font-weight: 700; }
+.section { color: #bdbdc5; font-size: 11px; font-weight: 700; }
+.muted { color: #888890; font-size: 11px; }
+button { background: #18181c; color: #eeeeef; border: 1px solid #303038; border-radius: 6px; padding: 6px 10px; }
+button:hover, button.suggested-action { background: #eeeeee; color: #080808; }
+scale trough { background: #25252b; min-height: 5px; border-radius: 3px; }
+scale highlight { background: #cfcfd5; border-radius: 3px; }
+"""
+
+
+def run(*args):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def command_exists(name):
+    return shutil.which(name) is not None
+
+
+class QuickControls(Gtk.Window):
+    def __init__(self, section="all"):
+        super().__init__(title="Noir Quick Controls", type=Gtk.WindowType.TOPLEVEL)
+        # A normal GTK window is positioned by the compositor, which makes it
+        # appear centered in Niri. Layer-shell gives this quick panel the same
+        # placement semantics as a desktop top-bar dropdown.
+        GtkLayerShell.init_for_window(self)
+        GtkLayerShell.set_namespace(self, "noir-quick-controls")
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.TOP, True)
+        # Wayland intentionally does not expose global pointer coordinates to
+        # unrelated clients. Use a safe top-right fallback when Waybar cannot
+        # provide an anchor rectangle.
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.RIGHT, True)
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, 40)
+        self.anchor_popup_to_pointer()
+        GtkLayerShell.set_exclusive_zone(self, -1)
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.ON_DEMAND)
+        self.set_default_size(410, 580)
+        self.set_resizable(False)
+        self.set_keep_above(True)
+        self.set_type_hint(Gdk.WindowTypeHint.POPUP_MENU)
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS.encode())
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        self.root.set_margin_top(16); self.root.set_margin_bottom(16)
+        self.root.set_margin_start(16); self.root.set_margin_end(16)
+        self.add(self.root)
+        heading = Gtk.Label(label="NOIR  //  QUICK CONTROLS", xalign=0)
+        heading.get_style_context().add_class("title")
+        self.root.pack_start(heading, False, False, 0)
+        self.add_sections(section)
+        self.connect("focus-out-event", self.dismiss)
+        self.connect("key-press-event", self.dismiss_on_escape)
+
+    def anchor_popup_to_pointer(self):
+        """Use pointer placement when available; otherwise stay top-right."""
+        try:
+            display = Gdk.Display.get_default()
+            pointer = display.get_default_seat().get_pointer()
+            _screen, x, y = pointer.get_position()
+            monitor = display.get_monitor_at_point(int(x), int(y))
+            if monitor is not None:
+                geometry = monitor.get_geometry()
+                GtkLayerShell.set_monitor(self, monitor)
+                relative_x = int(x - geometry.x)
+                if relative_x > 0:
+                    GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.RIGHT, False)
+                    GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.LEFT, True)
+                    GtkLayerShell.set_margin(self, GtkLayerShell.Edge.LEFT, max(8, min(relative_x - 205, geometry.width - 418)))
+                    return
+        except (AttributeError, TypeError, ValueError):
+            pass
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.RIGHT, 8)
+
+    def label(self, text, style="section"):
+        item = Gtk.Label(label=text, xalign=0)
+        item.get_style_context().add_class(style)
+        return item
+
+    def row(self, buttons):
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        for text, callback in buttons:
+            button = Gtk.Button(label=text)
+            button.connect("clicked", callback)
+            box.pack_start(button, True, True, 0)
+        return box
+
+    def add_sections(self, requested):
+        sections = {
+            "audio": self.audio,
+            "network": self.network,
+            "display": self.display,
+            "system": self.system,
+            "media": self.media,
+            "all": lambda: (self.audio(), self.network(), self.display(), self.media(), self.system()),
+        }
+        sections.get(requested, sections["all"])()
+
+    def audio(self):
+        self.root.pack_start(self.label("AUDIO"), False, False, 0)
+        sink = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        sink.set_value(self.wpctl_volume("@DEFAULT_AUDIO_SINK@"))
+        sink.set_draw_value(True); sink.set_value_pos(Gtk.PositionType.RIGHT)
+        sink.connect("value-changed", lambda scale: run("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{scale.get_value()/100:.2f}"))
+        self.root.pack_start(sink, False, False, 0)
+        self.root.pack_start(self.device_selector("Output device", "Sinks:"), False, False, 0)
+        self.root.pack_start(self.device_selector("Input device", "Sources:"), False, False, 0)
+        self.root.pack_start(self.row([
+            ("󰕾 Mute output", lambda *_: run("wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle")),
+            ("󰍬 Mute mic", lambda *_: run("wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "toggle")),
+        ]), False, False, 0)
+
+    def wpctl_devices(self, section):
+        result = run("wpctl", "status")
+        if not result: return []
+        devices = []; active_section = False
+        for line in result.stdout.splitlines():
+            if line.strip().endswith(section):
+                active_section = True; continue
+            if active_section and line.strip().endswith(":") and line.strip() != section:
+                break
+            if active_section:
+                match = re.search(r"(\*)?\s*(\d+)\.\s+(.+?)\s*$", line)
+                if match: devices.append((match.group(2), match.group(3), bool(match.group(1))))
+        return devices
+
+    def device_selector(self, title, section):
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        box.pack_start(self.label(title, "muted"), True, True, 0)
+        combo = Gtk.ComboBoxText()
+        devices = self.wpctl_devices(section)
+        for identifier, name, _active in devices: combo.append(identifier, name)
+        if devices: combo.set_active(next((i for i, item in enumerate(devices) if item[2]), 0))
+        combo.connect("changed", lambda widget: self.select_device(widget))
+        box.pack_start(combo, False, False, 0)
+        return box
+
+    def select_device(self, combo):
+        identifier = combo.get_active_id()
+        if identifier: run("wpctl", "set-default", identifier)
+
+    def wpctl_volume(self, target):
+        result = run("wpctl", "get-volume", target)
+        if result:
+            match = re.search(r"([0-9.]+)", result.stdout)
+            if match:
+                return min(100, float(match.group(1)) * 100)
+        return 50
+
+    def network(self):
+        self.root.pack_start(self.label("NETWORK"), False, False, 0)
+        result = run("nmcli", "-t", "-f", "TYPE,STATE,CONNECTION", "device")
+        status = next((line.replace(":", " · ", 2) for line in (result.stdout.splitlines() if result else []) if ":connected:" in f":{line}:"), "Network status unavailable")
+        self.root.pack_start(self.label(status, "muted"), False, False, 0)
+        wifi = run("nmcli", "-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "device", "wifi", "list", "--rescan", "no")
+        networks = []
+        for line in (wifi.stdout.splitlines() if wifi else []):
+            fields = line.split(":", 3)
+            if len(fields) == 4 and fields[1].strip():
+                networks.append(fields)
+        if networks:
+            for fields in networks[:6]:
+                active, ssid, signal_level, security = fields
+                text = f"{'● ' if active == '*' else ''}{ssid}  {signal_level}%"
+                button = Gtk.Button(label=text)
+                button.set_halign(Gtk.Align.FILL)
+                button.connect("clicked", lambda _button, name=ssid, auth=security: self.connect_wifi(name, auth))
+                self.root.pack_start(button, False, False, 0)
+        else:
+            self.root.pack_start(self.label("No Wi-Fi networks found", "muted"), False, False, 0)
+        self.root.pack_start(self.row([
+            ("Wi-Fi", lambda *_: run("nmcli", "radio", "wifi", "toggle")),
+            ("Airplane off", lambda *_: run("nmcli", "radio", "all", "on")),
+        ]), False, False, 0)
+
+    def connect_wifi(self, ssid, security):
+        if not security or security == "--":
+            run("nmcli", "device", "wifi", "connect", ssid)
+            return
+        dialog = Gtk.Dialog(title=f"Connect to {ssid}", transient_for=self, flags=Gtk.DialogFlags.MODAL)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Connect", Gtk.ResponseType.OK)
+        content = dialog.get_content_area()
+        content.set_spacing(8); content.set_margin_top(12); content.set_margin_bottom(12)
+        content.set_margin_start(16); content.set_margin_end(16)
+        content.pack_start(Gtk.Label(label=f"Password for {ssid}", xalign=0), False, False, 0)
+        password = Gtk.Entry(); password.set_visibility(False); password.set_activates_default(True)
+        content.pack_start(password, False, False, 0)
+        dialog.set_default_response(Gtk.ResponseType.OK); dialog.show_all()
+        if dialog.run() == Gtk.ResponseType.OK and password.get_text():
+            run("nmcli", "device", "wifi", "connect", ssid, "password", password.get_text())
+        dialog.destroy()
+
+    def brightness_row(self, title, getter, setter):
+        self.root.pack_start(self.label(title, "muted"), False, False, 0)
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+        scale.set_value(getter()); scale.set_draw_value(True); scale.set_value_pos(Gtk.PositionType.RIGHT)
+        scale.connect("value-changed", lambda widget: setter(int(widget.get_value())))
+        self.root.pack_start(scale, False, False, 0)
+
+    def display(self):
+        self.root.pack_start(self.label("BRIGHTNESS & DISPLAYS"), False, False, 0)
+        found = False
+        if command_exists("brightnessctl"):
+            devices = []
+            result = run("brightnessctl", "-l")
+            if result:
+                devices = re.findall(r"Device '([^']+)' of type '([^']+)'", result.stdout)
+            for name, kind in devices or [("", "backlight")]:
+                if kind not in ("backlight", "leds"): continue
+                found = True
+                self.brightness_row("Internal · " + (name or "backlight"), lambda n=name: self.brightnessctl_get(n), lambda value, n=name: self.brightnessctl_set(n, value))
+        if command_exists("ddcutil"):
+            result = run("ddcutil", "detect")
+            displays = re.findall(r"Display (\d+)", result.stdout if result else "")
+            for number in sorted(set(displays), key=int):
+                found = True
+                self.brightness_row("External monitor · Display " + number, lambda n=number: self.ddc_get(n), lambda value, n=number: self.ddc_set(n, value))
+        if not found:
+            self.root.pack_start(self.label("Install brightnessctl and/or ddcutil to control displays.", "muted"), False, False, 0)
+
+    def brightnessctl_get(self, device):
+        args = ["brightnessctl"] + (["-d", device] if device else []) + ["get"]
+        result = run(*args); maximum = run(*(["brightnessctl"] + (["-d", device] if device else []) + ["max"]))
+        try: return float(result.stdout.strip()) / float(maximum.stdout.strip()) * 100
+        except (AttributeError, ValueError, ZeroDivisionError): return 50
+
+    def brightnessctl_set(self, device, value):
+        run(*(["brightnessctl"] + (["-d", device] if device else []) + ["set", f"{value}%"]))
+
+    def ddc_get(self, number):
+        result = run("ddcutil", "getvcp", "10", "--display", number)
+        match = re.search(r"current value = (\d+)", result.stdout if result else "", re.I)
+        return float(match.group(1)) if match else 50
+
+    def ddc_set(self, number, value):
+        run("ddcutil", "setvcp", "10", str(value), "--display", number)
+
+    def media(self):
+        self.root.pack_start(self.label("MEDIA"), False, False, 0)
+        self.root.pack_start(self.row([("󰒮", lambda *_: run("playerctl", "previous")), ("󰐊 / 󰏤", lambda *_: run("playerctl", "play-pause")), ("󰒭", lambda *_: run("playerctl", "next"))]), False, False, 0)
+
+    def system(self):
+        self.root.pack_start(self.label("SYSTEM"), False, False, 0)
+        self.root.pack_start(self.row([
+            ("Notifications", lambda *_: run("dunstctl", "history-pop")),
+            ("Lock", lambda *_: self.launch("noir-lockscreen")),
+        ]), False, False, 0)
+        self.root.pack_start(self.row([("Screenshot", lambda *_: self.launch("noir-screenshot")), ("Power", lambda *_: self.launch("wlogout", "-b", "4", "-c", "16", "-r", "0", "-m", "340", "-s"))]), False, False, 0)
+
+    def dismiss(self, *_):
+        self.destroy()
+        return False
+
+    def dismiss_on_escape(self, _window, event):
+        if event.keyval == Gdk.KEY_Escape:
+            self.destroy()
+            return True
+        return False
+
+    def launch(self, *args):
+        try: subprocess.Popen(args, start_new_session=True)
+        except OSError: pass
+
+
+class PopupServer:
+    """Single resident GTK process; Waybar clients only send tiny commands."""
+    def __init__(self):
+        try: SOCKET_FILE.unlink()
+        except FileNotFoundError: pass
+        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.server.bind(str(SOCKET_FILE)); self.server.listen(8); self.server.setblocking(False)
+        os.chmod(SOCKET_FILE, 0o600)
+        self.window = None
+        self.section = None
+        GLib.timeout_add(40, self.poll)
+
+    def poll(self):
+        while True:
+            try:
+                client, _ = self.server.accept()
+            except BlockingIOError:
+                break
+            try:
+                command = json.loads(client.recv(4096).decode())
+                self.toggle(command.get("section", "all"))
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass
+            finally:
+                client.close()
+        return True
+
+    def toggle(self, section):
+        if self.window is not None:
+            same = self.section == section
+            self.window.destroy()
+            self.window = None
+            self.section = None
+            if same: return
+        self.section = section
+        self.window = QuickControls(section)
+        self.window.connect("destroy", self.closed)
+        self.window.show_all()
+
+    def closed(self, window):
+        if window is self.window:
+            self.window = None
+            self.section = None
+        return False
+
+    def run(self):
+        try: Gtk.main()
+        finally:
+            self.server.close()
+            try: SOCKET_FILE.unlink()
+            except FileNotFoundError: pass
+
+
+def send_toggle(section):
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(0.4); client.connect(str(SOCKET_FILE))
+        client.sendall(json.dumps({"section": section}).encode()); client.close()
+    except OSError:
+        return 1
+    return 0
+
+
+def main():
+    argument = sys.argv[1] if len(sys.argv) > 1 else "all"
+    if argument in ("--daemon", "daemon"):
+        PopupServer().run()
+    else:
+        section = sys.argv[2] if argument == "toggle" and len(sys.argv) > 2 else argument
+        raise SystemExit(send_toggle(section))
+
+
+if __name__ == "__main__": main()

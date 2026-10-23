@@ -1,11 +1,11 @@
 {
     "layer": "top",
     "position": "top",
-    "height": 32,
+    "height": 11,
     "spacing": 8,
     "modules-left": ["niri/workspaces", "custom/layout"],
     "modules-center": ["clock", "custom/weather", "custom/notifications"],
-    "modules-right": ["tray", "cpu", "memory", "disk", "pulseaudio", "pulseaudio#microphone", "network", "battery", "custom/settings", "custom/power"],
+    "modules-right": ["tray", "cpu", "memory", "disk", "pulseaudio", "pulseaudio#microphone", "network", "battery", "custom/brightness", "custom/settings", "custom/power"],
     "niri/workspaces": {
         "format": "{value}",
         "all-outputs": true,
@@ -14,22 +14,27 @@
         "on-scroll-up": "niri msg action focus-workspace-up",
         "on-scroll-down": "niri msg action focus-workspace-down"
     },
-    "custom/layout": { "format": "󰕮", "tooltip": "Noir desktop", "on-click": "sh -c '$HOME/.local/bin/noir-settings'" },
+    "custom/layout": {
+        "format": "󰕮",
+        "tooltip": "Quick controls",
+        "on-click": "noir-popup toggle all"
+    },
     "clock": {
         "format": "{:%H:%M %a, %b %d}",
-        "tooltip-format": "<big>{:%Y %B}</big>\n<tt><small>{calendar}</small></tt>"
+        "tooltip-format": "<big>{:%Y %B}</big>\n<tt><small>{calendar}</small></tt>",
+        "on-click": "noir-popup toggle system"
     },
     "custom/weather": {
         "exec": "noir-weather",
         "interval": 900,
         "format": "{}",
-        "on-click": "xdg-open https://wttr.in"
+        "on-click": "noir-popup toggle all"
     },
     "custom/notifications": {
         "exec": "noir-notifications",
         "interval": 2,
         "format": "{}",
-        "on-click": "dunstctl history-pop",
+        "on-click": "noir-popup toggle system",
         "on-click-right": "dunstctl close-all",
         "on-click-middle": "dunstctl set-paused toggle"
     },
@@ -38,33 +43,36 @@
         "interval": 2,
         "format": "󰻠 {usage}%",
         "format-alt": "󰻠 {load1}",
-        "tooltip-format": "CPU usage: {usage}%\nLoad: {load1} {load5} {load15}"
+        "tooltip-format": "CPU usage: {usage}%\nLoad: {load1} {load5} {load15}",
+        "on-click": "noir-popup toggle system"
     },
     "memory": {
         "interval": 2,
         "format": "󰘚 {percentage}%",
         "format-alt": "󰘚 {used:0.1f}G/{total:0.1f}G",
-        "tooltip-format": "Memory: {used:0.1f}G / {total:0.1f}G"
+        "tooltip-format": "Memory: {used:0.1f}G / {total:0.1f}G",
+        "on-click": "noir-popup toggle system"
     },
     "disk": {
         "interval": 30,
         "path": "/",
         "format": "󰋊 {percentage_used}%",
-        "tooltip-format": "Disk: {used} / {total} ({percentage_used}%)"
+        "tooltip-format": "Disk: {used} / {total} ({percentage_used}%)",
+        "on-click": "noir-popup toggle system"
     },
     "pulseaudio": {
         "format": "{icon} {volume}%",
         "format-muted": "󰖁 {volume}%",
         "format-icons": ["󰕿", "󰖀", "󰕾"],
         "scroll-step": 5,
-        "on-click": "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle",
+        "on-click": "noir-popup toggle audio",
         "on-click-right": "pavucontrol"
     },
     "pulseaudio#microphone": {
         "format": "{format_source}",
         "format-source": "󰍬 {volume}%",
         "format-source-muted": "󰍭 {volume}%",
-        "on-click": "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle",
+        "on-click": "noir-popup toggle audio",
         "on-click-right": "pavucontrol"
     },
     "network": {
@@ -72,24 +80,32 @@
         "format-ethernet": "󰈀 {ipaddr}",
         "format-disconnected": "󰤭",
         "tooltip-format": "{essid} · {ifname} · {ipaddr}",
-        "on-click": "nm-connection-editor",
+        "on-click": "noir-popup toggle network",
         "on-click-right": "kitty nmtui"
     },
     "battery": {
         "states": { "warning": 30, "critical": 15 },
         "format": "{icon} {capacity}%",
         "format-charging": "󰂄 {capacity}%",
-        "format-icons": ["󰁺", "󰁼", "󰁾", "󰂀", "󰁹"]
+        "format-icons": ["󰁺", "󰁼", "󰁾", "󰂀", "󰁹"],
+        "on-click": "noir-popup toggle display"
+    },
+    "custom/brightness": {
+        "exec": "noir-brightness",
+        "interval": 5,
+        "format": "{}",
+        "tooltip": "Display brightness",
+        "on-click": "noir-popup toggle display"
     },
     "custom/settings": {
         "format": "󰒓",
         "tooltip": true,
         "tooltip-format": "Noir Settings",
-        "on-click": "sh -c '$HOME/.local/bin/noir-settings'"
+        "on-click": "noir-popup toggle all"
     },
     "custom/power": {
         "format": "󰐥",
         "tooltip": false,
-        "on-click": "wlogout -b 4 -c 16 -r 0 -m 340 -s"
+        "on-click": "noir-popup toggle system"
     }
 }

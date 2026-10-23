@@ -1,0 +1,9 @@
+/* Generated palette variables. noir-palette updates this file in-place. */
+:root {
+  --noir-background: #000000;
+  --noir-surface: #121215;
+  --noir-accent: #cfcfcf;
+  --noir-foreground: #f3f3f5;
+  --noir-muted: #9999a1;
+  --noir-border: #29292f;
+}

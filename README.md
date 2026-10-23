@@ -1,6 +1,6 @@
 # Noir Niri Rice
 
-A lightweight black-and-grayscale Niri setup using Waybar, Kitty, Fish, Fuzzel, Swaylock, Wlogout, Dunst, and YAD. It does not use Quickshell.
+A lightweight black-and-grayscale Niri setup using Astal/AGS v3, Kitty, Fish, Fuzzel, Swaylock, Wlogout, Dunst, and YAD. Waybar files remain only as rollback material.
 
 ## Vibe-coded
 
@@ -30,7 +30,8 @@ To reload the applied Niri configuration in the current session, run `niri msg a
 - `Super/Command+Shift+W`: wallpaper selector
 - `Super/Command+Ctrl+W`: random wallpaper
 - `Super+1` through `Super+9`: workspaces
-- `Super+Arrow` or `Super+H/J/K/L`: focus
+- `Super+Up/Down`: previous/next workspace
+- `Super+Left/Right` or `Super+H/J/K/L`: focus
 - `Super+Shift+Arrow` or `Super+Shift+H/J/K/L`: move windows
 - `Super+Shift+S`: screenshot selection
 - `Print Screen`: screenshot menu for the entire screen, focused window, or selected area (also copies the image to the clipboard)
@@ -43,14 +44,16 @@ The Wallpaper page can optionally create a cached ImageMagick-dithered copy befo
 
 ## Settings GUI
 
-`noir-settings` is also available from the Waybar gear button. It is a native GTK control center with a dark sidebar, a Wallpaper page with live image preview and ImageMagick dithering controls, Status Bar, Displays, Window Manager, and Presets & Dotfiles. Settings preview live with debounced updates. The Status Bar page exposes the complete Noir Waybar palette, workspace/module states, borders, opacity, and compositor blur with native color pickers. The Lock Screen page exposes all Swaylock color states. Waybar displays compact live CPU and memory usage stats. The Window Manager page applies Niri layout fields directly. The separate native `noir-display-menu` provides live output cards and Primary only, Secondary only, Mirror, and Extend actions. Mirror mode uses `wl-mirror`, because Niri does not provide native output mirroring.
+`noir-settings` is also available from the Astal gear button. It is a native GTK control center with a dark sidebar, a Wallpaper page with live image preview and ImageMagick dithering controls, Astal Shell, Displays, Window Manager, and Presets & Dotfiles. The Astal Shell page reloads the single AGS process and checks dependencies. The Lock Screen page exposes all Swaylock color states. The Window Manager page applies Niri layout fields directly. The separate native `noir-display-menu` provides live output cards and Primary only, Secondary only, Mirror, and Extend actions. Mirror mode uses `wl-mirror`, because Niri does not provide native output mirroring.
 
 LazyVim integration is included under `config/nvim`: the self-contained `noir` colorscheme is selected by `lua/plugins/noir.lua` and matches the Kitty, Waybar, Niri, and Swaylock palette. It does not add an external theme dependency. Display profile choices are saved in `~/.config/noir-rice/display.json`; on startup, the internal display is used alone when no external monitor is connected, otherwise the saved profile is restored.
 
-The settings control center also includes searchable modules, diagnostics, live Kitty controls and terminal preview, Neovim theme controls, complete Waybar palette controls and visual previews, all Swaylock color states, blurred wallpaper lock-screen clock controls, disk usage, wallpaper favorites, and slideshow controls.
+The settings control center also includes searchable modules, diagnostics, live Kitty controls and terminal preview, Neovim theme controls, Astal shell controls, all Swaylock color states, blurred wallpaper lock-screen clock controls, disk usage, wallpaper favorites, and slideshow controls.
 
 ## Dependencies
 
-Required: `niri`, `waybar`, `kitty`, `fish`, `fuzzel`, `swaybg`, `swaylock`, `wlogout`, `dunst`, `yad`, `jq`, `grim`, `brightnessctl`, and `playerctl`.
+Required: `niri`, `ags`, `gjs`, `kitty`, `fish`, `fuzzel`, `swaybg`, `swaylock`, `wlogout`, `dunst`, `yad`, `jq`, `grim`, `brightnessctl`, and `playerctl`.
+
+On Arch, `apply.sh` checks the AGS and Astal runtime libraries and installs missing build/runtime packages using `pacman` plus `yay` or `paru`. Other distributions need AGS v3 and Astal GTK4 installed before applying.
 
 Optional: `nwg-displays` for fine-grained display configuration, `wl-mirror` for mirroring, `curl` for weather, `nmcli` or `nmtui` for network actions, `pavucontrol` for audio, `blueman-manager` for Bluetooth, ImageMagick for wallpaper dithering, and `slurp` for region screenshots and the Print Screen menu.

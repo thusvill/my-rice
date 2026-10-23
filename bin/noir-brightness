@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Compact Waybar indicator for the first available brightness controller.
+set -u
+
+if [[ "${1:-}" == "up" || "${1:-}" == "down" ]]; then
+    delta="5%+"
+    [[ "$1" == "down" ]] && delta="5%-"
+    step=5
+    [[ "$1" == "down" ]] && step=-5
+    if command -v brightnessctl >/dev/null 2>&1; then
+        brightnessctl set "$delta" >/dev/null 2>&1 || true
+    fi
+    if command -v ddcutil >/dev/null 2>&1; then
+        while read -r display; do
+            [[ -n "$display" ]] || continue
+            current="$(ddcutil getvcp 10 --display "$display" 2>/dev/null | sed -nE 's/.*current value = *([0-9]+).*/\1/p')"
+            [[ "$current" =~ ^[0-9]+$ ]] || continue
+            next=$(( current + step ))
+            (( next < 0 )) && next=0
+            (( next > 100 )) && next=100
+            ddcutil setvcp 10 "$next" --display "$display" >/dev/null 2>&1 || true
+        done < <(ddcutil detect 2>/dev/null | sed -nE 's/.*Display ([0-9]+).*/\1/p' | sort -u)
+    fi
+    exit 0
+fi
+
+if command -v brightnessctl >/dev/null 2>&1; then
+    value="$(brightnessctl -m 2>/dev/null | awk -F, 'NR==1 {gsub(/%/,"",$4); print $4}')"
+    [[ "$value" =~ ^[0-9]+$ ]] && { printf '󰃠 %s%%\n' "$value"; exit 0; }
+fi
+printf '󰃠 --\n'

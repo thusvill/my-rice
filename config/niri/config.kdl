@@ -43,13 +43,6 @@ hotkey-overlay {
     skip-at-startup
 }
 
-layer-rule {
-    match namespace="^waybar$"
-    background-effect {
-        blur false
-    }
-}
-
 // Keep the live Command+D launcher as a centered overlay, never a tiled window.
 window-rule {
     match title="^Noir Launcher$"
@@ -77,7 +70,7 @@ window-rule {
 
 spawn-at-startup "sh" "-c" "$HOME/.local/bin/noir-wallpaper init"
 spawn-at-startup "sh" "-c" "$HOME/.local/bin/noir-display-profile"
-spawn-at-startup "waybar"
+spawn-at-startup "ags" "run" "$HOME/.config/astal/app.tsx"
 spawn-at-startup "dunst"
 
 binds {
@@ -102,8 +95,8 @@ binds {
 
     Mod+Left { focus-column-left; }
     Mod+Right { focus-column-right; }
-    Mod+Up { focus-window-up; }
-    Mod+Down { focus-window-down; }
+    Mod+Up { focus-workspace-up; }
+    Mod+Down { focus-workspace-down; }
     Mod+H { focus-column-left; }
     Mod+Alt+L { focus-column-right; }
     Mod+K { focus-window-up; }

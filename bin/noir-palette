@@ -17,7 +17,8 @@ HOME = Path.home()
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "noir-rice"
 STATE = CONFIG / "noir-rice" / "palette.json"
-WAYBAR_CSS = CONFIG / "waybar" / "style.css"
+ASTAL_THEME = CONFIG / "astal" / "theme.css"
+WAYBAR_CSS = CONFIG / "waybar" / "style.css"  # rollback-only compatibility
 KITTY = CONFIG / "kitty" / "kitty.conf"
 NVIM = CONFIG / "noir-rice" / "nvim.json"
 DUNST = CONFIG / "dunst" / "dunstrc"
@@ -189,6 +190,22 @@ def apply_waybar(colors, mode):
     WAYBAR_CSS.write_text(css)
 
 
+def apply_astal(colors, mode):
+    """Write the active shell theme as CSS variables consumed by Astal."""
+    if not ASTAL_THEME.parent.exists():
+        return
+    values = {
+        "background": colors["background"], "surface": colors["surface"],
+        "accent": colors["accent"], "foreground": colors["foreground"],
+        "muted": colors["muted"], "border": colors["border"],
+    }
+    if mode == "accent":
+        values["background"] = DEFAULT_COLORS["background"]
+        values["surface"] = DEFAULT_COLORS["surface"]
+    text = ":root {\n" + "".join(f"  --noir-{key}: {value};\n" for key, value in values.items()) + "}\n"
+    ASTAL_THEME.write_text(text)
+
+
 def apply_kitty(colors, mode):
     if not KITTY.exists():
         return
@@ -225,16 +242,18 @@ def apply_dunst(colors):
 
 def apply_defaults():
     """Restore the original Noir palette without touching layout settings."""
-    apply_waybar(DEFAULT_COLORS, "full")
+    apply_astal(DEFAULT_COLORS, "full")
     apply_kitty(DEFAULT_COLORS, "full")
     apply_nvim(DEFAULT_COLORS, "full")
     apply_dunst(DEFAULT_COLORS)
 
 
 def reload_desktop():
-    subprocess.run(["pkill", "-x", "waybar"], stderr=subprocess.DEVNULL)
-    if shutil_which("waybar"):
-        subprocess.Popen(["waybar"], start_new_session=True)
+    if shutil_which("ags"):
+        subprocess.run(["ags", "quit"], stderr=subprocess.DEVNULL)
+        astal = CONFIG / "astal" / "app.tsx"
+        if astal.exists():
+            subprocess.Popen(["ags", "run", str(astal)], start_new_session=True)
     if shutil_which("dunstctl"):
         subprocess.run(["dunstctl", "reload"], stderr=subprocess.DEVNULL)
     if shutil_which("kitty"):
@@ -257,7 +276,7 @@ def apply_palette():
         # Accent-only mode must not retain a background left by a previous
         # wallpaper mode, so restore Noir surfaces before applying the accent.
         apply_defaults()
-    apply_waybar(colors, mode)
+    apply_astal(colors, mode)
     apply_kitty(colors, mode)
     apply_nvim(colors, mode)
     if mode in ("background", "full"):

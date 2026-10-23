@@ -1,0 +1,8 @@
+{
+  "height": 32,
+  "spacing": 8,
+  "clock_format": "%H:%M %a, %b %d",
+  "weather_location": "Colombo",
+  "opacity": 100,
+  "visible_modules": ["workspaces", "clock", "weather", "audio", "network", "display", "bluetooth", "media", "notifications", "system"]
+}
