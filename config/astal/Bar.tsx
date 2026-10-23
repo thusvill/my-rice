@@ -1,5 +1,6 @@
 import { Astal, Gtk } from "ags/gtk4";
 import { createPoll } from "ags/time";
+import GLib from "gi://GLib";
 import { Popup } from "./Popup";
 import { PopupManager, PopupName } from "./PopupManager";
 import { run } from "./services";
@@ -30,24 +31,46 @@ const workspacesRaw = createPoll("[]", 500, ["niri", "msg", "--json", "workspace
 
 // ── Workspaces ───────────────────────────────────────────────────────────────
 function WorkspaceButtons() {
-  return (
-    <box spacing={settings.spacing}>
-      {workspacesRaw.as((raw: string) => {
-        let list: { id: number; name?: string; is_focused: boolean }[] = [];
-        try { list = JSON.parse(raw); } catch { /* niri not running yet */ }
-        if (list.length === 0) {
-          return [<label label="1" cssClasses={["workspace-active"]} />];
-        }
-        return list.map(w => (
-          <button
-            cssClasses={w.is_focused ? ["workspace-active"] : ["workspace"]}
-            onClicked={() => run(["niri", "msg", "action", "focus-workspace", String(w.id)])}
-            label={w.name ? w.name : String(w.id)}
-          />
-        ));
-      })}
-    </box>
-  );
+  const container = <box spacing={settings.spacing} /> as Gtk.Box;
+
+  const updateChildren = (raw: string) => {
+    let list: { id: number; idx: number; name?: string | null; is_focused: boolean }[] = [];
+    try { list = JSON.parse(raw); } catch { /* niri not running yet */ }
+
+    // Sort by idx for consistent ordering
+    list.sort((a, b) => a.idx - b.idx);
+
+    // Remove existing children
+    let child = container.get_first_child();
+    while (child) {
+      const next = child.get_next_sibling();
+      container.remove(child);
+      child = next;
+    }
+
+    if (list.length === 0) {
+      const label = <label label="1" cssClasses={["workspace-active"]} /> as Gtk.Widget;
+      container.append(label);
+      return;
+    }
+
+    for (const w of list) {
+      const btn = (
+        <button
+          cssClasses={w.is_focused ? ["workspace-active"] : ["workspace"]}
+          onClicked={() => run(["niri", "msg", "action", "focus-workspace", String(w.id)])}
+          label={w.name ?? String(w.idx)}
+        />
+      ) as Gtk.Widget;
+      container.append(btn);
+    }
+  };
+
+  // Initial render + subscribe to poll updates
+  updateChildren(workspacesRaw.get());
+  workspacesRaw.subscribe(updateChildren);
+
+  return container;
 }
 
 // ── Bar window ───────────────────────────────────────────────────────────────
@@ -99,17 +122,42 @@ export function PopupWindows(gdkmonitor: Astal.Monitor) {
     "audio", "network", "display", "bluetooth",
     "notifications", "system", "quick", "calendar", "media",
   ];
-  return names.map(name => (
-    <window
-      name={"popup-" + name}
-      gdkmonitor={gdkmonitor}
-      visible={PopupManager.activePopup.as(p => p === name)}
-      cssClasses={["popup-window"]}
-      exclusivity={Astal.Exclusivity.IGNORE}
-      anchor={Astal.WindowAnchor.TOP | Astal.WindowAnchor.RIGHT}
-      keymode={Astal.Keymode.ON_DEMAND}
-    >
-      <Popup name={name} />
-    </window>
-  ));
+  return names.map(name => {
+    // Create the window widget first, then attach controllers imperatively
+    // because AstalWindow does not support a `setup` JSX prop.
+    const win = (
+      <window
+        name={"popup-" + name}
+        gdkmonitor={gdkmonitor}
+        visible={PopupManager.activePopup.as(p => p === name)}
+        cssClasses={["popup-window"]}
+        exclusivity={Astal.Exclusivity.IGNORE}
+        anchor={Astal.WindowAnchor.TOP | Astal.WindowAnchor.RIGHT}
+        keymode={Astal.Keymode.ON_DEMAND}
+        marginTop={settings.height + 4}
+      >
+        <Popup name={name} />
+      </window>
+    ) as Astal.Window;
+
+    // Close on Escape key
+    const keyCtrl = new Gtk.EventControllerKey();
+    keyCtrl.connect("key-pressed", (_: unknown, keyval: number) => {
+      if (keyval === 65307) { PopupManager.close(); return true; }
+      return false;
+    });
+    win.add_controller(keyCtrl);
+
+    // Close when the window loses focus (click outside)
+    const focusCtrl = new Gtk.EventControllerFocus();
+    focusCtrl.connect("leave", () => {
+      GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+        if (!win.is_active) PopupManager.close();
+        return GLib.SOURCE_REMOVE;
+      });
+    });
+    win.add_controller(focusCtrl);
+
+    return win;
+  });
 }

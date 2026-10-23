@@ -141,7 +141,7 @@ slider highlight {
 }
 `;
 
-app.start({ css: theme + css, main() {
+app.start({ css: css + theme, main() {
   const display = Gdk.Display.get_default();
   const monitors = display.get_monitors();
   for (let i = 0; i < monitors.get_n_items(); i++) {
